@@ -113,4 +113,4 @@ if __name__ == "__main__":
     generate_vocab_embed('kbp', '../pretraining-models/cc.en.300.bin', 'fasttext')
     generate_vocab_embed('ace04', '../pretraining-models/cc.en.300.bin', 'fasttext')
     generate_vocab_embed('ace05', '../pretraining-models/cc.en.300.bin', 'fasttext')
-    generate_vocab_embed('genia91', '../pretraining-models/BioWordVec_PubMed_MIMICIII_d200.bin', 'fasttext')
+#   generate_vocab_embed('genia91', '../pretraining-models/BioWordVec_PubMed_MIMICIII_d200.bin', 'fasttext')

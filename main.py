@@ -25,7 +25,7 @@ from torch_ema import ExponentialMovingAverage
 
 def seed_worker(worker_id):
     worker_seed = torch.initial_seed() % 2**32
-    numpy.random.seed(worker_seed)
+    np.random.seed(worker_seed)
     random.seed(worker_seed)
 
 
@@ -38,7 +38,7 @@ def run(args):
 
     output_basename = generate_output_folder_name(args)
     print(output_basename)
-    writer = SummaryWriter(comment=output_basename[0:200])
+    writer = SummaryWriter(comment=output_basename[0:15])
     output_path = os.path.join(args.output_base_dir, output_basename)
 
     if os.path.exists(f'{output_path}/metric_log'):

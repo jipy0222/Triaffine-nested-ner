@@ -1,7 +1,7 @@
 from transformers import AdamW, get_linear_schedule_with_warmup
 
 
-BERT_ABBV = {'Bio_ClinicalBERT':'clinicalbert',
+BERT_ABBV = {'Bio_ClinicalBERT': 'clinicalbert',
              'bert-base-multilingual-cased': 'mbert_cased',
              'bert-base-multilingual-uncased': 'mbert_uncased',
              'bluebert_pubmed_mimic_base': 'bluebert',
