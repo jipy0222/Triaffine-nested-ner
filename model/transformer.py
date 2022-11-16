@@ -4,6 +4,7 @@ from typing import Optional
 import torch
 from torch import nn
 import torch.nn.functional as F
+import warnings
 
 
 def _get_activation_fn(activation):
@@ -171,9 +172,9 @@ def unscale_multi_head_attention_forward(query: Tensor,
             k = torch.cat([k, bias_k.repeat(1, bsz, 1)])
             v = torch.cat([v, bias_v.repeat(1, bsz, 1)])
             if attn_mask is not None:
-                attn_mask = pad(attn_mask, (0, 1))
+                attn_mask = F.pad(attn_mask, (0, 1))
             if key_padding_mask is not None:
-                key_padding_mask = pad(key_padding_mask, (0, 1))
+                key_padding_mask = F.pad(key_padding_mask, (0, 1))
         else:
             assert static_k is None, "bias cannot be added to static key."
             assert static_v is None, "bias cannot be added to static value."
@@ -208,9 +209,9 @@ def unscale_multi_head_attention_forward(query: Tensor,
         k = torch.cat([k, torch.zeros((k.size(0), 1) + k.size()[2:], dtype=k.dtype, device=k.device)], dim=1)
         v = torch.cat([v, torch.zeros((v.size(0), 1) + v.size()[2:], dtype=v.dtype, device=v.device)], dim=1)
         if attn_mask is not None:
-            attn_mask = pad(attn_mask, (0, 1))
+            attn_mask = F.pad(attn_mask, (0, 1))
         if key_padding_mask is not None:
-            key_padding_mask = pad(key_padding_mask, (0, 1))
+            key_padding_mask = F.pad(key_padding_mask, (0, 1))
 
     attn_output_weights = torch.bmm(q, k.transpose(1, 2))
     assert list(attn_output_weights.size()) == [bsz * num_heads, tgt_len, src_len]
@@ -220,7 +221,6 @@ def unscale_multi_head_attention_forward(query: Tensor,
             attn_output_weights.masked_fill_(attn_mask, float('-inf'))
         else:
             attn_output_weights += attn_mask
-
 
     if key_padding_mask is not None:
         attn_output_weights = attn_output_weights.view(bsz, num_heads, tgt_len, src_len)
@@ -276,13 +276,16 @@ class UnscaleMultiHeadAttention(MultiheadAttention):
 class TransformerEncoderLayer_Pos(TransformerEncoderLayer):
     
     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, activation="relu",
-                 unscale = False):
+                 unscale=False):
         super().__init__(d_model, nhead, dim_feedforward, dropout, activation)
         if unscale:
             self.self_attn = UnscaleMultiHeadAttention(d_model, nhead, dropout=dropout)
 
     def with_pos_embed(self, tensor, pos: Optional[Tensor]):
-        return tensor if pos is None else tensor + pos
+        if pos is None:
+            return tensor
+        else:
+            return tensor + pos
 
     def forward(self,
                 src,

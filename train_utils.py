@@ -41,7 +41,7 @@ def generate_output_folder_name(args):
                     args.score]
         if args.negative_sampling:
             args_list += [f"negd_{args.hard_neg_dist}"]
-    if args.model in ["SpanAttModel", "SpanAttModelV2", "SpanAttModelV3"]:
+    if args.model in ["SpanAttModel", "SpanAttModelV2", "SpanAttModelV3", "VanillaSpanMax", "VanillaSpanMean", "SpanAttInToken"]:
         args_list = [args.version,
                     args.model,
                     main_name_list(args.bert_name_or_path),
@@ -224,6 +224,7 @@ def generate_optimizer_scheduler(args, model, len_train_dataloader):
     else:
         scheduler = None
     return optimizer, scheduler
+
 
 def weight_scheduler(epoch_idx, total_epoch=None, args=None, method="square"):
     if method == "square":

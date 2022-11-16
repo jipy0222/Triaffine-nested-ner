@@ -16,7 +16,7 @@ from evaluation import decode, metric, write_predict
 from train_parser import generate_parser, generate_config, generate_loss_config
 from train_utils import generate_output_folder_name, generate_optimizer_scheduler
 from model.span import SpanModel
-from model.span_att_v2 import SpanAttModelV2, SpanAttModelV3
+from model.span_att_v2 import SpanAttModelV2, SpanAttModelV3, VanillaSpanMax, VanillaSpanMean, SpanAttInToken
 from input_util import prepare_input
 from train_utils import main_name, weight_scheduler
 import random
@@ -104,15 +104,29 @@ def run(args):
     score_setting['rel_pos'] = args.rel_pos
     score_setting['rel_k'] = args.rel_k
         
-
+    # ABOVE IS NO NEED TO MODIFY
     if args.model == "SpanModel":
         model = SpanModel(args.bert_name_or_path, encoder_config_dict,
                           len(train_dataset.type2id), score_setting,
                           loss_config=loss_config_dict).to(args.device)
     if args.model == "SpanAttModelV3":
         model = SpanAttModelV3(args.bert_name_or_path, encoder_config_dict,
-                          len(train_dataset.type2id), score_setting,
-                          loss_config=loss_config_dict).to(args.device)
+                               len(train_dataset.type2id), score_setting,
+                               loss_config=loss_config_dict).to(args.device)
+    # Here to add self-defined model
+    if args.model == "VanillaSpanMax":
+        model = VanillaSpanMax(args.bert_name_or_path, encoder_config_dict,
+                               len(train_dataset.type2id), score_setting,
+                               loss_config=loss_config_dict).to(args.device)
+    if args.model == "VanillaSpanMean":
+        model = VanillaSpanMean(args.bert_name_or_path, encoder_config_dict,
+                                len(train_dataset.type2id), score_setting,
+                                loss_config=loss_config_dict).to(args.device)
+    if args.model == "SpanAttInToken":
+        model = SpanAttInToken(args.bert_name_or_path, encoder_config_dict,
+                                    len(train_dataset.type2id), score_setting,
+                                    loss_config=loss_config_dict).to(args.device)
+    # check how model work in generate_optimizer_scheduler
     optimizer, scheduler = generate_optimizer_scheduler(args, model, len(train_dataloader))
     
     if args.ema > 0.:
@@ -160,7 +174,7 @@ def run(args):
                         torch.save(model, os.path.join(output_path, f"ema{epoch_idx}.pth"))
                 early_stop_count += 1
 
-        if args.early_stop_epoch > 0 and early_stop_count >= args.early_stop_epoch:
+        if 0 < args.early_stop_epoch <= early_stop_count:
             print(f"Early Stop at Epoch {epoch_idx}, \
                     F1 does not improve on dev set for {early_stop_count} epoch.")
             break
@@ -185,6 +199,7 @@ def run(args):
     model = torch.load(best_path).to(args.device)
     if ema is not None:
         ema = torch.load(best_ema).to(args.device)
+    # check how model work in decode
     dev_strict, dev_relax = decode(dev_dataloader, model, args, ema)
     test_strict, test_relax = decode(test_dataloader, model, args, ema)
     
@@ -257,6 +272,7 @@ def main():
     parser = generate_parser()
     args = parser.parse_args()
     run(args)
+
 
 if __name__ == "__main__":
     main()

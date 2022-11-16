@@ -8,7 +8,7 @@ def generate_parser():
                         choices=["ace05", "ace04", "genia91", "kbp"],
                         help="Dataset version.")
     parser.add_argument("--model", type=str, default="SpanModel",
-                        choices=["SpanModel", "SpanAttModelV3"])
+                        choices=["SpanModel", "SpanAttModelV3", "VanillaSpanMax", "VanillaSpanMean", "SpanAttInToken"])
     parser.add_argument("--schema", type=str, default="span",
                         choices=["span"])
     parser.add_argument("--soft_iou", type=float, default=0.7)
@@ -97,7 +97,7 @@ def generate_parser():
     parser.add_argument("--use_context", action="store_true")
     parser.add_argument("--context_lstm", action="store_true")
     
-    parser.add_argument("--negative_sampling", action="store_true") # used for span base
+    parser.add_argument("--negative_sampling", action="store_true")  # used for span base
     parser.add_argument("--hard_neg_dist", type=int, default=3)
     parser.add_argument("--label_smoothing", type=float, default=0.0)
     
@@ -109,9 +109,9 @@ def generate_parser():
     parser.add_argument("--span_layer_count", type=int, default=2)
     parser.add_argument("--max_span_count", type=int, default=30)
     parser.add_argument("--share_parser", action="store_true")
-    parser.add_argument("--unscale", action="store_true") # for transformer not tri-affine attention
+    parser.add_argument("--unscale", action="store_true")  # for transformer not tri-affine attention
     parser.add_argument("--scale", type=str, default="none",
-                        choices=["none", "sqrt", "triv1", "triv2"]) # for tri-affine attention
+                        choices=["none", "sqrt", "triv1", "triv2"])  # for tri-affine attention
     parser.add_argument("--init_std", type=float, default=2e-4)
     parser.add_argument("--layer_norm", action="store_true")
 
@@ -147,8 +147,9 @@ def generate_parser():
     
     return parser
 
+
 def generate_loss_config(args):
-    loss_dict = {'name':args.loss}
+    loss_dict = {'name': args.loss}
     if args.loss == "ce":
         loss_dict['na_weight'] = args.na_weight
     if args.loss == "focal":
@@ -186,18 +187,19 @@ def generate_loss_config(args):
         loss_dict['kl'] = args.kl
         loss_dict['kl_alpha'] = args.kl_alpha
     return loss_dict
-    
+
+
 def generate_config(args):
-    bert_config = {'bert_before_lstm':True if args.bert_before_lstm else False,
-                   'subword_aggr':args.subword_aggr,
-                   'bert_output':args.bert_output,
-                   'reinit':args.reinit}
+    bert_config = {'bert_before_lstm': True if args.bert_before_lstm else False,
+                   'subword_aggr': args.subword_aggr,
+                   'bert_output': args.bert_output,
+                   'reinit': args.reinit}
     if args.word:
-        word_embedding_config = {'path':'',
-                                'dropout':args.word_dp,
-                                'dim':0,
-                                'padding_idx':0,
-                                'freeze':args.word_freeze}
+        word_embedding_config = {'path': '',
+                                 'dropout': args.word_dp,
+                                 'dim': 0,
+                                 'padding_idx': 0,
+                                 'freeze': args.word_freeze}
         if args.version.find("ace04") >= 0:
             if not args.word_embed:
                 word_embedding_config['path'] = 'data/ace04/wiki.npy'
@@ -234,10 +236,10 @@ def generate_config(args):
         word_embedding_config = {}
         
     if args.char:
-        char_embedding_config = {'layer':args.char_layer,
-                                'dropout':args.char_dp,
-                                'dim':args.char_dim,
-                                'padding_idx':0}
+        char_embedding_config = {'layer': args.char_layer,
+                                 'dropout': args.char_dp,
+                                 'dim': args.char_dim,
+                                 'padding_idx': 0}
         if args.version.find("ace05") >= 0:
             char_embedding_config['padding_idx'] = 86
         if args.version.find("genia91") >= 0:
@@ -250,9 +252,9 @@ def generate_config(args):
         char_embedding_config = {}
         
     if args.pos:
-        pos_embedding_config = {'dropout':args.pos_dp,
-                                'dim':args.pos_dim,
-                                'padding_idx':0}
+        pos_embedding_config = {'dropout': args.pos_dp,
+                                'dim': args.pos_dim,
+                                'padding_idx': 0}
         if args.version.find("ace05") >= 0:
             pos_embedding_config['padding_idx'] = 45
         if args.version.find("ace04") >= 0:
@@ -264,22 +266,22 @@ def generate_config(args):
     else:
         pos_embedding_config = {}
         
-    lstm_config = {'name':args.agg_layer,
-                   'dim':args.lstm_dim,
-                   'layer':args.lstm_layer,
-                   'dropout':args.lstm_dp,
-                   'context_lstm':args.context_lstm}
+    lstm_config = {'name': args.agg_layer,
+                   'dim': args.lstm_dim,
+                   'layer': args.lstm_layer,
+                   'dropout': args.lstm_dp,
+                   'context_lstm': args.context_lstm}
     if args.lstm_layer == 1 and args.agg_layer == "lstm":
         lstm_config['dropout'] = 0.0
     if args.agg_layer == "transformer":
-        lstm_config['dropout'] = 0.1 # use transformer default
+        lstm_config['dropout'] = 0.1  # use transformer default
         
-    other_config = {'prenorm':args.pre_norm,
-                    'span_layer_count':args.span_layer_count,
-                    'max_span_count':args.max_span_count,
-                    'share_parser':args.share_parser,
-                    'unscale':args.unscale,
-                    'act':args.act}
+    other_config = {'prenorm': args.pre_norm,
+                    'span_layer_count': args.span_layer_count,
+                    'max_span_count': args.max_span_count,
+                    'share_parser': args.share_parser,
+                    'unscale': args.unscale,
+                    'act': args.act}
     
     return bert_config, \
         word_embedding_config, \
