@@ -476,6 +476,7 @@ class VanillaSpanMax(SpanAttModelV2):
                                              score_setting,
                                              loss_config)
         # self.linear_proj = MLP(self.hidden_dim, self._hidden_dim, self._hidden_dim, 2, self.dropout, self.act)
+        # another trial for git
         self.classifier = MLP(self.hidden_dim, 256, self.num_class, 6)
 
     def get_class_position(self, input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
