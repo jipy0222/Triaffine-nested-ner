@@ -475,9 +475,8 @@ class VanillaSpanMax(SpanAttModelV2):
                                              num_class,
                                              score_setting,
                                              loss_config)
-        # self.linear_proj = MLP(self.hidden_dim, self._hidden_dim, self._hidden_dim, 2, self.dropout, self.act)
-        # another trial for git
-        self.classifier = MLP(self.hidden_dim, 256, self.num_class, 6)
+        self.linear_proj = MLP(self.hidden_dim, self._hidden_dim, self._hidden_dim, 2, self.dropout, self.act)
+        self.classifier = MLP(self.hidden_dim, 64, self.num_class, 4)
 
     def get_class_position(self, input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
                            context_ce_mask, context_subword_group, context_map,
@@ -489,7 +488,7 @@ class VanillaSpanMax(SpanAttModelV2):
         # 1. projection
         # 2. make span representation matrix by different methods(try mean first)
         # 3. make logit matrix(bsz * word_cnt * word_cnt * type)
-        # 4. class_loss = self.class_loss_fn(logit.reshape(-1, self.num_class), label.reshape(-1))
+        # 4. class_loss = self.class_loss_fn(logit, label)
         #    return class_loss
         memory = self.encoder(input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
                               context_ce_mask, context_subword_group, context_map,
@@ -499,8 +498,8 @@ class VanillaSpanMax(SpanAttModelV2):
                               bert_embed)
 
         embeds_length = (input_word != max(input_word.view(-1))).sum(1)
-        # proj_repr = self.linear_proj(memory)
-        proj_repr = memory
+        proj_repr = self.linear_proj(memory)
+        # proj_repr = memory
         bsz, seq, hd = proj_repr.size()
 
         # bsz * word_cnt * hidden_dimension(256) -> bsz * word_cnt * word_cnt * hidden_dimension(256)
@@ -522,10 +521,10 @@ class VanillaSpanMax(SpanAttModelV2):
 
         # bsz * word_cnt * word_cnt * hidden_dimension(256) -> bsz * word_cnt * word_cnt * class
         logit = self.classifier(span_repr)
-        logit = logit.masked_fill_(mask, -1e6)
+        # logit = logit.masked_fill_(mask, -1e6)
 
-        logit = F.softmax(logit, dim=-1)
-        return logit
+        # logit = F.softmax(logit, dim=-1)
+        return logit, mask
 
     def forward(self, input_ids, attention_mask, ce_mask, token_type_ids, subword_group, input_word, input_char,
                 input_pos,
@@ -533,7 +532,7 @@ class VanillaSpanMax(SpanAttModelV2):
                 l_input_word=None, l_input_char=None, l_input_pos=None,
                 r_input_word=None, r_input_char=None, r_input_pos=None,
                 token_label=None, bert_embed=None, head_trans=None, tail_trans=None):
-        logit = self.get_class_position(input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
+        logit, mask = self.get_class_position(input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
                                         context_ce_mask, context_subword_group, context_map,
                                         input_word, input_char, input_pos,
                                         l_input_word, l_input_char, l_input_pos,
@@ -543,7 +542,9 @@ class VanillaSpanMax(SpanAttModelV2):
         label = label[:, 0:word_cnt, 0:word_cnt]
         if self.negative_sampling:
             label = negative_sampling(label, self.hard_neg_dist)
-        class_loss = self.class_loss_fn(logit.reshape(-1, self.num_class), label.reshape(-1))
+        logit = logit[~mask[:, :, :, 0]]
+        label = label[~mask[:, :, :, 0]]
+        class_loss = self.class_loss_fn(logit, label)
         if self.class_loss_weight is not None:
             class_loss *= self.class_loss_weight
         return class_loss
@@ -555,22 +556,23 @@ class VanillaSpanMax(SpanAttModelV2):
                 r_input_word, r_input_char, r_input_pos,
                 bert_embed=None):
 
-        logit = self.get_class_position(input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
+        logit, mask = self.get_class_position(input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
                                         context_ce_mask, context_subword_group, context_map,
                                         input_word, input_char, input_pos,
                                         l_input_word, l_input_char, l_input_pos,
                                         r_input_word, r_input_char, r_input_pos,
                                         bert_embed)
         bsz = logit.size(0)
+        seq = logit.size(1)
         embeds_length = (input_word != max(input_word.view(-1))).sum(1)
-        logit = logit > 0.3
         result = []
         for i in range(bsz):
-            tmp_result = torch.argwhere(logit[i, :, :]).tolist()
             result.append([])
-            for item in tmp_result:
-                if item[2] < self.true_class and item[0] <= item[1] < embeds_length[i]:
-                    result[i].append(item)
+            idx = torch.argmax(logit[i], dim=-1).tolist()
+            for x in range(seq):
+                for y in range(seq):
+                    if x <= y < embeds_length[i] and idx[x][y] < self.true_class:
+                        result[i].append([x, y, idx[x][y]])
         return result
 
 
@@ -595,7 +597,7 @@ class VanillaSpanMean(SpanAttModelV2):
         # 1. projection
         # 2. make span representation matrix by different methods(try mean first)
         # 3. make logit matrix(bsz * word_cnt * word_cnt * type)
-        # 4. class_loss = self.class_loss_fn(logit.reshape(-1, self.num_class), label.reshape(-1))
+        # 4. class_loss = self.class_loss_fn(logit, label)
         #    return class_loss
         memory = self.encoder(input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
                               context_ce_mask, context_subword_group, context_map,
@@ -629,14 +631,10 @@ class VanillaSpanMean(SpanAttModelV2):
 
         # bsz * word_cnt * word_cnt * hidden_dimension(256) -> bsz * word_cnt * word_cnt * class
         logit = self.classifier(span_repr)
-        logit = logit.masked_fill_(mask, -1e6)
+        # logit = logit.masked_fill_(mask, -1e6)
 
-        logit = F.softmax(logit, dim=-1)
-        seq = logit.size(1)
-        print("seq: ", seq)
-        if seq <= 8:
-            print("logit: ", logit)
-        return logit
+        # logit = F.softmax(logit, dim=-1)
+        return logit, mask
 
     def forward(self, input_ids, attention_mask, ce_mask, token_type_ids, subword_group, input_word, input_char,
                 input_pos,
@@ -644,7 +642,7 @@ class VanillaSpanMean(SpanAttModelV2):
                 l_input_word=None, l_input_char=None, l_input_pos=None,
                 r_input_word=None, r_input_char=None, r_input_pos=None,
                 token_label=None, bert_embed=None, head_trans=None, tail_trans=None):
-        logit = self.get_class_position(input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
+        logit, mask = self.get_class_position(input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
                                         context_ce_mask, context_subword_group, context_map,
                                         input_word, input_char, input_pos,
                                         l_input_word, l_input_char, l_input_pos,
@@ -654,7 +652,9 @@ class VanillaSpanMean(SpanAttModelV2):
         label = label[:, 0:word_cnt, 0:word_cnt]
         if self.negative_sampling:
             label = negative_sampling(label, self.hard_neg_dist)
-        class_loss = self.class_loss_fn(logit.reshape(-1, self.num_class), label.reshape(-1))
+        logit = logit[~mask[:, :, :, 0]]
+        label = label[~mask[:, :, :, 0]]
+        class_loss = self.class_loss_fn(logit, label)
         if self.class_loss_weight is not None:
             class_loss *= self.class_loss_weight
         return class_loss
@@ -666,22 +666,23 @@ class VanillaSpanMean(SpanAttModelV2):
                 r_input_word, r_input_char, r_input_pos,
                 bert_embed=None):
 
-        logit = self.get_class_position(input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
+        logit, mask = self.get_class_position(input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
                                         context_ce_mask, context_subword_group, context_map,
                                         input_word, input_char, input_pos,
                                         l_input_word, l_input_char, l_input_pos,
                                         r_input_word, r_input_char, r_input_pos,
                                         bert_embed)
         bsz = logit.size(0)
+        seq = logit.size(1)
         embeds_length = (input_word != max(input_word.view(-1))).sum(1)
-        logit = logit > 0.3
         result = []
         for i in range(bsz):
-            tmp_result = torch.argwhere(logit[i, :, :]).tolist()
             result.append([])
-            for item in tmp_result:
-                if item[2] < self.true_class and item[0] <= item[1] < embeds_length[i]:
-                    result[i].append(item)
+            idx = torch.argmax(logit[i, ...], dim=-1).tolist()
+            for x in range(seq):
+                for y in range(seq):
+                    if x <= y < embeds_length[i] and idx[x][y] < self.true_class:
+                        result[i].append([x, y, idx[x][y]])
         return result
 
 
@@ -711,7 +712,7 @@ class SpanAttInToken(SpanAttModelV2):
         # 1. projection
         # 2. make span representation matrix by different methods(try max first)
         # 3. make logit matrix(bsz * word_cnt * word_cnt * type)
-        # 4. class_loss = self.class_loss_fn(logit.reshape(-1, self.num_class), label.reshape(-1))
+        # 4. class_loss = self.class_loss_fn(logit, label)
         #    return class_loss
         memory = self.encoder(input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
                               context_ce_mask, context_subword_group, context_map,
@@ -774,10 +775,10 @@ class SpanAttInToken(SpanAttModelV2):
 
         # bsz * word_cnt * word_cnt * hidden_dimension(1024) -> bsz * word_cnt * word_cnt * class
         logit = self.classifier(span_repr)
-        logit = logit.masked_fill_(mask, -1e6)
+        # logit = logit.masked_fill_(mask, -1e6)
 
-        logit = F.softmax(logit, dim=-1)
-        return logit
+        # logit = F.softmax(logit, dim=-1)
+        return logit, mask
 
     def forward(self, input_ids, attention_mask, ce_mask, token_type_ids, subword_group, input_word, input_char,
                 input_pos,
@@ -785,7 +786,7 @@ class SpanAttInToken(SpanAttModelV2):
                 l_input_word=None, l_input_char=None, l_input_pos=None,
                 r_input_word=None, r_input_char=None, r_input_pos=None,
                 token_label=None, bert_embed=None, head_trans=None, tail_trans=None):
-        logit = self.get_class_position(input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
+        logit, mask = self.get_class_position(input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
                                         context_ce_mask, context_subword_group, context_map,
                                         input_word, input_char, input_pos,
                                         l_input_word, l_input_char, l_input_pos,
@@ -795,7 +796,9 @@ class SpanAttInToken(SpanAttModelV2):
         label = label[:, 0:word_cnt, 0:word_cnt]
         if self.negative_sampling:
             label = negative_sampling(label, self.hard_neg_dist)
-        class_loss = self.class_loss_fn(logit.reshape(-1, self.num_class), label.reshape(-1))
+        logit = logit[~mask[:, :, :, 0]]
+        label = label[~mask[:, :, :, 0]]
+        class_loss = self.class_loss_fn(logit, label)
         if self.class_loss_weight is not None:
             class_loss *= self.class_loss_weight
         return class_loss
@@ -807,20 +810,21 @@ class SpanAttInToken(SpanAttModelV2):
                 r_input_word, r_input_char, r_input_pos,
                 bert_embed=None):
 
-        logit = self.get_class_position(input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
+        logit, mask = self.get_class_position(input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
                                         context_ce_mask, context_subword_group, context_map,
                                         input_word, input_char, input_pos,
                                         l_input_word, l_input_char, l_input_pos,
                                         r_input_word, r_input_char, r_input_pos,
                                         bert_embed)
         bsz = logit.size(0)
+        seq = logit.size(1)
         embeds_length = (input_word != max(input_word.view(-1))).sum(1)
-        logit = logit > 0.3
         result = []
         for i in range(bsz):
-            tmp_result = torch.argwhere(logit[i, :, :]).tolist()
             result.append([])
-            for item in tmp_result:
-                if item[2] < self.true_class and item[0] <= item[1] < embeds_length[i]:
-                    result[i].append(item)
+            idx = torch.argmax(logit[i, ...], dim=-1).tolist()
+            for x in range(seq):
+                for y in range(seq):
+                    if x <= y < embeds_length[i] and idx[x][y] < self.true_class:
+                        result[i].append([x, y, idx[x][y]])
         return result
