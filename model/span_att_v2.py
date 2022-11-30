@@ -7,7 +7,7 @@ from model.parser import Biaffine, TypeAttention, TriAttention, TriAffineParser,
 from model.text_encoder import TextEncoder
 from model.losses import create_loss_function
 from span_utils import negative_sampling
-from model.transformer import TransformerEncoderLayer_Pos, TransformerEncoder_Pos
+from model.mytransformer import myTransformerEncoderLayer, myTransformerEncoder_Pos
 from span_utils import tensor_idx_add
 from model.mlp import MLP, MultiClassifier
 
@@ -696,9 +696,9 @@ class SpanAttInToken(SpanAttModelV2):
                                              loss_config)
         self.linear_proj = MLP(self.hidden_dim, self._hidden_dim, self._hidden_dim, 2, self.dropout, self.act)
         self.classifier = MLP(self._hidden_dim, 64, self.num_class, 4)
-        self.tranheads = 2
-        self.tranlayers = 2
-        trans_encoder_layer = nn.TransformerEncoderLayer(d_model=256, nhead=self.tranheads)
+        self.tranheads = 4
+        self.tranlayers = 6
+        trans_encoder_layer = myTransformerEncoderLayer(d_model=256, nhead=self.tranheads)
         trans_layernorm = nn.LayerNorm(256)
         self.trans = nn.TransformerEncoder(trans_encoder_layer, num_layers=self.tranlayers, norm=trans_layernorm)
 
@@ -770,7 +770,7 @@ class SpanAttInToken(SpanAttModelV2):
         # bsz * word_cnt * word_cnt * hidden_dimension(1024) into transformer encoder
         trans_repr = span_repr.reshape(bsz, seq * seq, hd)
         src_key_mask = src_key_mask.reshape(bsz, seq * seq)
-        span_repr = self.trans(trans_repr.permute(1, 0, 2), mask=src_mask, src_key_padding_mask=src_key_mask).permute(1, 0, 2)
+        span_repr = self.trans(trans_repr.permute(1, 0, 2), src_len=embeds_length, attn_pattern="insidetoken").permute(1, 0, 2)
         span_repr = span_repr.reshape(bsz, seq, seq, hd)
 
         # bsz * word_cnt * word_cnt * hidden_dimension(1024) -> bsz * word_cnt * word_cnt * class
