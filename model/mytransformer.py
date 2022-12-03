@@ -254,6 +254,7 @@ def insidetoken_extractor(q: Tensor, k: Tensor, v: Tensor, key_padding_mask: Ten
     pattern_mask = torch.broadcast_to(pattern_mask[None, ...], (bsz, seq * seq, seq * seq))
     pattern_mask4 = torch.broadcast_to(key_padding_mask[..., None], (bsz, seq * seq, seq * seq))
     pattern_mask = pattern_mask | pattern_mask4
+    pattern_mask[:, :, 0] = pattern_mask[:, :, 0] & (~key_padding_mask)
 
     q = q.transpose(0, 1).reshape(bsz*tgt_len, 1, embed_dim).transpose(0, 1).to(q.device)
     
@@ -268,12 +269,20 @@ def insidetoken_extractor(q: Tensor, k: Tensor, v: Tensor, key_padding_mask: Ten
     return q, k, v, new_key_padding_mask
 
 
-def insidetoken_reverse(attn_output: Tensor, ori_bsz: int):
-    # attn_output: [B, Nt, E]
-    # return will be reshaped attn_output
-    tgt_len = int(attn_output.shape[0]/ori_bsz)
+def samehandt_extractor(q: Tensor, k: Tensor, v: Tensor, key_padding_mask: Tensor):
+    # q: [len_of_tgt, batch_sz, Eq], k: [len_of_src, batch_sz, Eq], v: [len_of_src, batch_sz, Eq]
+    # key_padding_mask: [batch_sz, len_of_src]
+    # return will be reshaped q, k, v, src_len
+    pass
+
+
+
+def reverse(attn_output: Tensor, ori_bsz: int):
+    # attn_output: [Nt, B, E]
+    # return will be reshaped attn_output [new_Nt, ori_B, E]
+    tgt_len = int(attn_output.shape[1]/ori_bsz)
     embed_dim = attn_output.shape[2]
-    attn_output = attn_output.reshape(ori_bsz, tgt_len, embed_dim)
+    attn_output = attn_output.transpose(0, 1).reshape(ori_bsz, tgt_len, embed_dim).transpose(0, 1)
     return attn_output
 
 
@@ -391,6 +400,7 @@ def mymulti_head_attention_forward(
     is_batched = _mha_shape_check(query, key, value, src_len, num_heads)
 
     seq = int(math.sqrt(query.shape[0]))
+    bsz = query.shape[1]
     seq_t = torch.arange(seq).to(src_len.device)
     seq_x = torch.broadcast_to(seq_t[None, None, ...], (bsz, seq, seq))
     seq_y = torch.broadcast_to(seq_t[None, ..., None], (bsz, seq, seq))
@@ -463,7 +473,10 @@ def mymulti_head_attention_forward(
         tgt_len, bsz, embed_dim = q.shape
         source_len, _, _ = k.shape
     elif attn_pattern == "samehandt":
-        pass
+        q, k, v, key_padding_mask = samehandt_extractor(q, k, v, key_padding_mask)
+        ori_bsz = bsz
+        tgt_len, bsz, embed_dim = q.shape
+        source_len, _, _ = k.shape
     else:
         raise RuntimeError("attention pattern not defined.")
 
@@ -535,20 +548,20 @@ def mymulti_head_attention_forward(
     # (deep breath) calculate attention and out projection
     #
     attn_output, attn_output_weights = _scaled_dot_product_attention(q, k, v, attn_mask, dropout_p)
+    attn_output = attn_output.transpose(0, 1).contiguous().view(tgt_len * bsz, embed_dim)
+    attn_output = F.linear(attn_output, out_proj_weight, out_proj_bias)
+    attn_output = attn_output.view(tgt_len, bsz, attn_output.size(1))
     
     #
     # we still need to reverse attn_output to origin input format
     #
-    attn_output = insidetoken_reverse(attn_output, ori_bsz)
+    attn_output = reverse(attn_output, ori_bsz)
     bsz = ori_bsz
     tgt_len = attn_output.shape[1]
-    
-    attn_output = attn_output.transpose(0, 1).contiguous().view(tgt_len * bsz, embed_dim)
-    attn_output = F.linear(attn_output, out_proj_weight, out_proj_bias)
-    attn_output = attn_output.view(tgt_len, bsz, attn_output.size(1))
 
     if need_weights:
         # optionally average attention weights over heads
+        warnings.warn("Have not reverse attention weights.")
         attn_output_weights = attn_output_weights.view(bsz, num_heads, tgt_len, source_len)
         if average_attn_weights:
             attn_output_weights = attn_output_weights.sum(dim=1) / num_heads
@@ -712,23 +725,23 @@ class myMultiheadAttention(Module):
 
         if not self._qkv_same_embed_dim:
             attn_output, attn_output_weights = mymulti_head_attention_forward(
-                query, key, value, self.embed_dim, self.num_heads,
+                query, key, value, self.embed_dim, self.num_heads, src_len, 
                 self.in_proj_weight, self.in_proj_bias,
                 self.bias_k, self.bias_v, self.add_zero_attn,
                 self.dropout, self.out_proj.weight, self.out_proj.bias,
                 training=self.training,
-                src_len=src_len, need_weights=need_weights,
+                need_weights=need_weights,
                 attn_pattern=attn_pattern, use_separate_proj_weight=True,
                 q_proj_weight=self.q_proj_weight, k_proj_weight=self.k_proj_weight,
                 v_proj_weight=self.v_proj_weight, average_attn_weights=average_attn_weights)
         else:
             attn_output, attn_output_weights = mymulti_head_attention_forward(
-                query, key, value, self.embed_dim, self.num_heads,
+                query, key, value, self.embed_dim, self.num_heads, src_len, 
                 self.in_proj_weight, self.in_proj_bias,
                 self.bias_k, self.bias_v, self.add_zero_attn,
                 self.dropout, self.out_proj.weight, self.out_proj.bias,
                 training=self.training,
-                src_len=src_len, need_weights=need_weights,
+                need_weights=need_weights,
                 attn_pattern=attn_pattern, average_attn_weights=average_attn_weights)
         if self.batch_first and is_batched:
             return attn_output.transpose(1, 0), attn_output_weights

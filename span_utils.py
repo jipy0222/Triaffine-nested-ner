@@ -64,24 +64,9 @@ def tensor_idx_add(src, idx, value=1, coef=None):
     return src.reshape(sz)
 
 if __name__ == '__main__':
-    n = 30
-
-    def p(l):
-        return 2*(n-l+1)/(n*(n-1))
-
-    def p2(l):
-        return l
-
-    def mysum(l):
-        a = 0
-        for i in range(1, l+1):
-            a += i
-        return a
-
-    s = 0
-    for i in range(1, n+1):
-        s += p2(i)*p(i)
-
-    print(s)
-    print(p2(n))
-    print("hello")
+    import torch
+    import torch.nn.functional as F
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    nt = torch.nested_tensor([torch.randn((2, 6)), torch.randn((3, 6))], device=device)
+    print(nt)

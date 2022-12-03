@@ -7,7 +7,7 @@ from model.parser import Biaffine, TypeAttention, TriAttention, TriAffineParser,
 from model.text_encoder import TextEncoder
 from model.losses import create_loss_function
 from span_utils import negative_sampling
-from model.mytransformer import myTransformerEncoderLayer, myTransformerEncoder_Pos
+from model.mytransformer import myTransformerEncoderLayer, myTransformerEncoder
 from span_utils import tensor_idx_add
 from model.mlp import MLP, MultiClassifier
 
@@ -467,7 +467,7 @@ class SpanAttModelV3(SpanAttModelV2):
         return (hs_class, token_class, trans_class, new_span_score, filtered, flat_idx)
 
 
-class VanillaSpanMax(SpanAttModelV2):
+class VanillaSpanMax(nn.Module):
     def __init__(self, bert_model_path, encoder_config_dict,
                  num_class, score_setting, loss_config):
         super(VanillaSpanMax, self).__init__(bert_model_path,
@@ -475,6 +475,66 @@ class VanillaSpanMax(SpanAttModelV2):
                                              num_class,
                                              score_setting,
                                              loss_config)
+
+        self.encoder = TextEncoder(bert_model_path, encoder_config_dict[0], encoder_config_dict[1], encoder_config_dict[2], encoder_config_dict[3], encoder_config_dict[4])
+        self.encoder_config_dict = encoder_config_dict
+        self.hidden_dim = self.encoder.bert_hidden_dim
+
+        self.true_class = num_class
+        self.num_class = self.true_class + 1
+        
+        self.score_setting = score_setting
+        
+        self.dropout = self.score_setting.get('dp', 0.2)
+        assert self.score_setting.get('tri_affine', False)
+
+        self.loss_config = loss_config
+        self.loss_config['true_class'] = self.true_class
+        self.class_loss_fn = create_loss_function(self.loss_config)
+        
+        self._hidden_dim = self.score_setting['att_dim']
+        
+        self.act = self.encoder_config_dict[5].get('act', 'relu')
+        
+        self.token_aux_loss = False
+        if 'token_schema' in self.loss_config:
+            self.token_aux_loss = True
+            self.token_schema = loss_config['token_schema']
+            if self.token_schema == "BE":
+                self.token_label_count = 2
+            elif self.token_schema == "BIE":
+                self.token_label_count = 3
+            elif self.token_schema == "BIES":
+                self.token_label_count = 4
+            elif self.token_schema == "BE-type":
+                self.token_label_count = 2 * self.true_class
+            elif self.token_schema == "BIE-type":
+                self.token_label_count = 3 * self.true_class
+            elif self.token_schema == "BIES-type":
+                self.token_label_count = 4 * self.true_class
+            self.linear_token = nn.Linear(self.hidden_dim, self.token_label_count)
+            self.token_aux_weight = loss_config['token_aux_weight']
+            self.token_dropout = nn.Dropout(self.score_setting.get('dp', 0.2))
+            
+        self.negative_sampling = False
+        if self.loss_config.get('negative_sampling', False):
+            self.negative_sampling = True
+            self.hard_neg_dist = self.loss_config['hard_neg_dist']
+            
+        self.trans_aux_loss = False
+        if self.loss_config.get('trans_aux', False):
+            self.trans_aux_loss = True
+            self.trans_bi = Biaffine(self.hidden_dim, 2)
+            self.trans_dropout = nn.Dropout(self.score_setting.get('dp', 0.2))
+            self.trans_aux_weight = loss_config['trans_aux_weight']
+            
+        self.class_loss_weight = None
+            
+        if self.loss_config.get('kl', 'none') != 'none':
+            self.kl = self.loss_config['kl']
+            self.kl_alpha = self.loss_config['kl_alpha']
+            self.kl_loss_fn = torch.nn.KLDivLoss(reduction="batchmean")
+        
         self.linear_proj = MLP(self.hidden_dim, self._hidden_dim, self._hidden_dim, 2, self.dropout, self.act)
         self.classifier = MLP(self._hidden_dim, 64, self.num_class, 4)
 
@@ -576,7 +636,7 @@ class VanillaSpanMax(SpanAttModelV2):
         return result
 
 
-class VanillaSpanMean(SpanAttModelV2):
+class VanillaSpanMean(VanillaSpanMax):
     def __init__(self, bert_model_path, encoder_config_dict,
                  num_class, score_setting, loss_config):
         super(VanillaSpanMean, self).__init__(bert_model_path,
@@ -636,57 +696,8 @@ class VanillaSpanMean(SpanAttModelV2):
         # logit = F.softmax(logit, dim=-1)
         return logit, mask
 
-    def forward(self, input_ids, attention_mask, ce_mask, token_type_ids, subword_group, input_word, input_char,
-                input_pos,
-                label, context_ce_mask=None, context_subword_group=None, context_map=None,
-                l_input_word=None, l_input_char=None, l_input_pos=None,
-                r_input_word=None, r_input_char=None, r_input_pos=None,
-                token_label=None, bert_embed=None, head_trans=None, tail_trans=None):
-        logit, mask = self.get_class_position(input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
-                                        context_ce_mask, context_subword_group, context_map,
-                                        input_word, input_char, input_pos,
-                                        l_input_word, l_input_char, l_input_pos,
-                                        r_input_word, r_input_char, r_input_pos,
-                                        bert_embed)
-        word_cnt = logit.size(1)
-        label = label[:, 0:word_cnt, 0:word_cnt]
-        if self.negative_sampling:
-            label = negative_sampling(label, self.hard_neg_dist)
-        logit = logit[~mask[:, :, :, 0]]
-        label = label[~mask[:, :, :, 0]]
-        class_loss = self.class_loss_fn(logit, label)
-        if self.class_loss_weight is not None:
-            class_loss *= self.class_loss_weight
-        return class_loss
 
-    def predict(self, input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
-                context_ce_mask, context_subword_group, context_map,
-                input_word, input_char, input_pos,
-                l_input_word, l_input_char, l_input_pos,
-                r_input_word, r_input_char, r_input_pos,
-                bert_embed=None):
-
-        logit, mask = self.get_class_position(input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
-                                        context_ce_mask, context_subword_group, context_map,
-                                        input_word, input_char, input_pos,
-                                        l_input_word, l_input_char, l_input_pos,
-                                        r_input_word, r_input_char, r_input_pos,
-                                        bert_embed)
-        bsz = logit.size(0)
-        seq = logit.size(1)
-        embeds_length = (input_word != max(input_word.view(-1))).sum(1)
-        result = []
-        for i in range(bsz):
-            result.append([])
-            idx = torch.argmax(logit[i, ...], dim=-1).tolist()
-            for x in range(seq):
-                for y in range(seq):
-                    if x <= y < embeds_length[i] and idx[x][y] < self.true_class:
-                        result[i].append([x, y, idx[x][y]])
-        return result
-
-
-class SpanAttInToken(SpanAttModelV2):
+class SpanAttInToken(VanillaSpanMax):
     def __init__(self, bert_model_path, encoder_config_dict,
                  num_class, score_setting, loss_config):
         super(SpanAttInToken, self).__init__(bert_model_path,
@@ -700,7 +711,7 @@ class SpanAttInToken(SpanAttModelV2):
         self.tranlayers = 6
         trans_encoder_layer = myTransformerEncoderLayer(d_model=256, nhead=self.tranheads)
         trans_layernorm = nn.LayerNorm(256)
-        self.trans = nn.TransformerEncoder(trans_encoder_layer, num_layers=self.tranlayers, norm=trans_layernorm)
+        self.trans = myTransformerEncoder(trans_encoder_layer, num_layers=self.tranlayers, norm=trans_layernorm)
 
     def get_class_position(self, input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
                            context_ce_mask, context_subword_group, context_map,
@@ -742,34 +753,34 @@ class SpanAttInToken(SpanAttModelV2):
         embs = torch.broadcast_to(embeds_length[:, None, None], (bsz, seq, seq)).to(seq_x.device)
         mask2 = seq_x >= embs
         mask = mask1 | mask2
-        src_key_mask = mask.reshape(bsz, seq*seq).to(span_repr.device)
+        # src_key_mask = mask.reshape(bsz, seq*seq).to(span_repr.device)
         mask = torch.broadcast_to(mask[..., None], (bsz, seq, seq, self.num_class)).to(span_repr.device)
 
         # create src_mask to implement attention schema
-        t = torch.arange(seq).repeat(seq)
-        t1 = torch.broadcast_to(t[None, ...], (seq*seq, seq*seq))
-        t2 = torch.broadcast_to(t[..., None], (seq*seq, seq*seq))
-        src_mask1 = t1 <= t2
-        h = torch.arange(seq)
-        h = torch.broadcast_to(h[..., None], (seq, seq)).reshape(-1)
-        h1 = torch.broadcast_to(h[None, ...], (seq*seq, seq*seq))
-        h2 = torch.broadcast_to(h[..., None], (seq*seq, seq*seq))
-        src_mask2 = h1 >= h2
-        src_mask3 = ~(src_mask1 & src_mask2)
-        c = torch.ones(seq*seq)
-        for i in range(0, seq*seq, seq+1):
-            c[i] = 0
-        c = torch.broadcast_to(c[None, ...], (seq*seq, seq*seq)) > 0
-        src_mask = (c | src_mask3).to(span_repr.device)
-        src_mask = torch.broadcast_to(src_mask[None, ...], (bsz, seq * seq, seq * seq))
-        src_mask4 = torch.broadcast_to(src_key_mask[..., None], (bsz, seq * seq, seq * seq))
-        src_mask = src_mask & (~src_mask4)
-        src_mask = torch.broadcast_to(src_mask[:, None, ...], (bsz, self.tranheads, seq*seq, seq*seq))
-        src_mask = src_mask.reshape(bsz*self.tranheads, seq*seq, seq*seq).to(span_repr.device)
+        # t = torch.arange(seq).repeat(seq)
+        # t1 = torch.broadcast_to(t[None, ...], (seq*seq, seq*seq))
+        # t2 = torch.broadcast_to(t[..., None], (seq*seq, seq*seq))
+        # src_mask1 = t1 <= t2
+        # h = torch.arange(seq)
+        # h = torch.broadcast_to(h[..., None], (seq, seq)).reshape(-1)
+        # h1 = torch.broadcast_to(h[None, ...], (seq*seq, seq*seq))
+        # h2 = torch.broadcast_to(h[..., None], (seq*seq, seq*seq))
+        # src_mask2 = h1 >= h2
+        # src_mask3 = ~(src_mask1 & src_mask2)
+        # c = torch.ones(seq*seq)
+        # for i in range(0, seq*seq, seq+1):
+        #     c[i] = 0
+        # c = torch.broadcast_to(c[None, ...], (seq*seq, seq*seq)) > 0
+        # src_mask = (c | src_mask3).to(span_repr.device)
+        # src_mask = torch.broadcast_to(src_mask[None, ...], (bsz, seq * seq, seq * seq))
+        # src_mask4 = torch.broadcast_to(src_key_mask[..., None], (bsz, seq * seq, seq * seq))
+        # src_mask = src_mask & (~src_mask4)
+        # src_mask = torch.broadcast_to(src_mask[:, None, ...], (bsz, self.tranheads, seq*seq, seq*seq))
+        # src_mask = src_mask.reshape(bsz*self.tranheads, seq*seq, seq*seq).to(span_repr.device)
 
         # bsz * word_cnt * word_cnt * hidden_dimension(1024) into transformer encoder
         trans_repr = span_repr.reshape(bsz, seq * seq, hd)
-        src_key_mask = src_key_mask.reshape(bsz, seq * seq)
+        # src_key_mask = src_key_mask.reshape(bsz, seq * seq)
         span_repr = self.trans(trans_repr.permute(1, 0, 2), src_len=embeds_length, attn_pattern="insidetoken").permute(1, 0, 2)
         span_repr = span_repr.reshape(bsz, seq, seq, hd)
 
@@ -779,52 +790,3 @@ class SpanAttInToken(SpanAttModelV2):
 
         # logit = F.softmax(logit, dim=-1)
         return logit, mask
-
-    def forward(self, input_ids, attention_mask, ce_mask, token_type_ids, subword_group, input_word, input_char,
-                input_pos,
-                label, context_ce_mask=None, context_subword_group=None, context_map=None,
-                l_input_word=None, l_input_char=None, l_input_pos=None,
-                r_input_word=None, r_input_char=None, r_input_pos=None,
-                token_label=None, bert_embed=None, head_trans=None, tail_trans=None):
-        logit, mask = self.get_class_position(input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
-                                        context_ce_mask, context_subword_group, context_map,
-                                        input_word, input_char, input_pos,
-                                        l_input_word, l_input_char, l_input_pos,
-                                        r_input_word, r_input_char, r_input_pos,
-                                        bert_embed)
-        word_cnt = logit.size(1)
-        label = label[:, 0:word_cnt, 0:word_cnt]
-        if self.negative_sampling:
-            label = negative_sampling(label, self.hard_neg_dist)
-        logit = logit[~mask[:, :, :, 0]]
-        label = label[~mask[:, :, :, 0]]
-        class_loss = self.class_loss_fn(logit, label)
-        if self.class_loss_weight is not None:
-            class_loss *= self.class_loss_weight
-        return class_loss
-
-    def predict(self, input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
-                context_ce_mask, context_subword_group, context_map,
-                input_word, input_char, input_pos,
-                l_input_word, l_input_char, l_input_pos,
-                r_input_word, r_input_char, r_input_pos,
-                bert_embed=None):
-
-        logit, mask = self.get_class_position(input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
-                                        context_ce_mask, context_subword_group, context_map,
-                                        input_word, input_char, input_pos,
-                                        l_input_word, l_input_char, l_input_pos,
-                                        r_input_word, r_input_char, r_input_pos,
-                                        bert_embed)
-        bsz = logit.size(0)
-        seq = logit.size(1)
-        embeds_length = (input_word != max(input_word.view(-1))).sum(1)
-        result = []
-        for i in range(bsz):
-            result.append([])
-            idx = torch.argmax(logit[i, ...], dim=-1).tolist()
-            for x in range(seq):
-                for y in range(seq):
-                    if x <= y < embeds_length[i] and idx[x][y] < self.true_class:
-                        result[i].append([x, y, idx[x][y]])
-        return result
