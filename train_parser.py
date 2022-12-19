@@ -8,7 +8,7 @@ def generate_parser():
                         choices=["ace05", "ace04", "genia91", "kbp"],
                         help="Dataset version.")
     parser.add_argument("--model", type=str, default="SpanModel",
-                        choices=["SpanModel", "SpanAttModelV3", "VanillaSpanMax", "VanillaSpanMean", "SpanAttInToken"])
+                        choices=["SpanModel", "SpanAttModelV3", "VanillaSpanMax", "VanillaSpanMean", "SpanAttInToken", "SpanAttsamehandt", "SpanAttsubspan", "SpanAttsibling"])
     parser.add_argument("--schema", type=str, default="span",
                         choices=["span"])
     parser.add_argument("--soft_iou", type=float, default=0.7)

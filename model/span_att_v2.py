@@ -470,11 +470,7 @@ class SpanAttModelV3(SpanAttModelV2):
 class VanillaSpanMax(nn.Module):
     def __init__(self, bert_model_path, encoder_config_dict,
                  num_class, score_setting, loss_config):
-        super(VanillaSpanMax, self).__init__(bert_model_path,
-                                             encoder_config_dict,
-                                             num_class,
-                                             score_setting,
-                                             loss_config)
+        super(VanillaSpanMax, self).__init__()
 
         self.encoder = TextEncoder(bert_model_path, encoder_config_dict[0], encoder_config_dict[1], encoder_config_dict[2], encoder_config_dict[3], encoder_config_dict[4])
         self.encoder_config_dict = encoder_config_dict
@@ -559,7 +555,6 @@ class VanillaSpanMax(nn.Module):
 
         embeds_length = (input_word != max(input_word.view(-1))).sum(1)
         proj_repr = self.linear_proj(memory)
-        # proj_repr = memory
         bsz, seq, hd = proj_repr.size()
 
         # bsz * word_cnt * hidden_dimension(256) -> bsz * word_cnt * word_cnt * hidden_dimension(256)
@@ -668,7 +663,6 @@ class VanillaSpanMean(VanillaSpanMax):
 
         embeds_length = (input_word != max(input_word.view(-1))).sum(1)
         proj_repr = self.linear_proj(memory)
-        # proj_repr = memory
         bsz, seq, hd = proj_repr.size()
 
         # bsz * word_cnt * hidden_dimension(256) -> bsz * word_cnt * word_cnt * hidden_dimension(256)
@@ -708,7 +702,7 @@ class SpanAttInToken(VanillaSpanMax):
         self.linear_proj = MLP(self.hidden_dim, self._hidden_dim, self._hidden_dim, 2, self.dropout, self.act)
         self.classifier = MLP(self._hidden_dim, 64, self.num_class, 4)
         self.tranheads = 4
-        self.tranlayers = 6
+        self.tranlayers = 4
         trans_encoder_layer = myTransformerEncoderLayer(d_model=256, nhead=self.tranheads)
         trans_layernorm = nn.LayerNorm(256)
         self.trans = myTransformerEncoder(trans_encoder_layer, num_layers=self.tranlayers, norm=trans_layernorm)
@@ -734,15 +728,14 @@ class SpanAttInToken(VanillaSpanMax):
 
         embeds_length = (input_word != max(input_word.view(-1))).sum(1)
         proj_repr = self.linear_proj(memory)
-        # proj_repr = memory
         bsz, seq, hd = proj_repr.size()
 
-        # bsz * word_cnt * hidden_dimension(1024) -> bsz * word_cnt * word_cnt * hidden_dimension(1024)
+        # bsz * word_cnt * hidden_dimension(1024) -> bsz * word_cnt * word_cnt * hidden_dimension(256)
         tmp_proj_repr = proj_repr
         span_repr = torch.zeros(bsz, seq, seq, hd).to(memory.device)
         for i in range(proj_repr.size()[1]):
-            tmp_proj_repr = (tmp_proj_repr[:, 0:seq - i, :] * i + proj_repr[:, i:, :]) / (i + 1)
-            # tmp_proj_repr = torch.maximum(proj_repr[:, i:, :], tmp_proj_repr[:, 0:seq - i, :])
+            # tmp_proj_repr = (tmp_proj_repr[:, 0:seq - i, :] * i + proj_repr[:, i:, :]) / (i + 1)
+            tmp_proj_repr = torch.maximum(proj_repr[:, i:, :], tmp_proj_repr[:, 0:seq - i, :])
             span_repr[:, range(seq - i), range(i, seq), :] = tmp_proj_repr
 
         # create src_key_mask to identify illegal span with True
@@ -770,15 +763,16 @@ class SpanAttInToken(VanillaSpanMax):
         # c = torch.ones(seq*seq)
         # for i in range(0, seq*seq, seq+1):
         #     c[i] = 0
-        # c = torch.broadcast_to(c[None, ...], (seq*seq, seq*seq)) > 0
-        # src_mask = (c | src_mask3).to(span_repr.device)
+        # oric = torch.broadcast_to(c[None, ...], (seq*seq, seq*seq)) > 0
+        # src_mask = (oric | src_mask3).to(span_repr.device)
         # src_mask = torch.broadcast_to(src_mask[None, ...], (bsz, seq * seq, seq * seq))
+        
         # src_mask4 = torch.broadcast_to(src_key_mask[..., None], (bsz, seq * seq, seq * seq))
         # src_mask = src_mask & (~src_mask4)
         # src_mask = torch.broadcast_to(src_mask[:, None, ...], (bsz, self.tranheads, seq*seq, seq*seq))
         # src_mask = src_mask.reshape(bsz*self.tranheads, seq*seq, seq*seq).to(span_repr.device)
 
-        # bsz * word_cnt * word_cnt * hidden_dimension(1024) into transformer encoder
+        # bsz * word_cnt * word_cnt * hidden_dimension(256) into transformer encoder
         trans_repr = span_repr.reshape(bsz, seq * seq, hd)
         # src_key_mask = src_key_mask.reshape(bsz, seq * seq)
         span_repr = self.trans(trans_repr.permute(1, 0, 2), src_len=embeds_length, attn_pattern="insidetoken").permute(1, 0, 2)
@@ -789,4 +783,190 @@ class SpanAttInToken(VanillaSpanMax):
         # logit = logit.masked_fill_(mask, -1e6)
 
         # logit = F.softmax(logit, dim=-1)
+        return logit, mask
+
+
+class SpanAttsamehandt(VanillaSpanMax):
+    def __init__(self, bert_model_path, encoder_config_dict,
+                 num_class, score_setting, loss_config):
+        super(SpanAttsamehandt, self).__init__(bert_model_path,
+                                             encoder_config_dict,
+                                             num_class,
+                                             score_setting,
+                                             loss_config)
+        self.linear_proj = MLP(self.hidden_dim, self._hidden_dim, self._hidden_dim, 2, self.dropout, self.act)
+        self.classifier = MLP(self._hidden_dim, 64, self.num_class, 4)
+        self.tranheads = 4
+        self.tranlayers = 4
+        trans_encoder_layer = myTransformerEncoderLayer(d_model=256, nhead=self.tranheads)
+        trans_layernorm = nn.LayerNorm(256)
+        self.trans = myTransformerEncoder(trans_encoder_layer, num_layers=self.tranlayers, norm=trans_layernorm)
+
+    def get_class_position(self, input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
+                           context_ce_mask, context_subword_group, context_map,
+                           input_word, input_char, input_pos,
+                           l_input_word, l_input_char, l_input_pos,
+                           r_input_word, r_input_char, r_input_pos,
+                           bert_embed=None):
+        memory = self.encoder(input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
+                              context_ce_mask, context_subword_group, context_map,
+                              input_word, input_char, input_pos,
+                              l_input_word, l_input_char, l_input_pos,
+                              r_input_word, r_input_char, r_input_pos,
+                              bert_embed)
+
+        embeds_length = (input_word != max(input_word.view(-1))).sum(1)
+        proj_repr = self.linear_proj(memory)
+        bsz, seq, hd = proj_repr.size()
+
+        # bsz * word_cnt * hidden_dimension(1024) -> bsz * word_cnt * word_cnt * hidden_dimension(256)
+        tmp_proj_repr = proj_repr
+        span_repr = torch.zeros(bsz, seq, seq, hd).to(memory.device)
+        for i in range(proj_repr.size()[1]):
+            # tmp_proj_repr = (tmp_proj_repr[:, 0:seq - i, :] * i + proj_repr[:, i:, :]) / (i + 1)
+            tmp_proj_repr = torch.maximum(proj_repr[:, i:, :], tmp_proj_repr[:, 0:seq - i, :])
+            span_repr[:, range(seq - i), range(i, seq), :] = tmp_proj_repr
+
+        # create src_key_mask to identify illegal span with True
+        seq_t = torch.arange(seq)
+        seq_x = torch.broadcast_to(seq_t[None, None, ...], (bsz, seq, seq))
+        seq_y = torch.broadcast_to(seq_t[None, ..., None], (bsz, seq, seq))
+        mask1 = seq_x < seq_y
+        embs = torch.broadcast_to(embeds_length[:, None, None], (bsz, seq, seq)).to(seq_x.device)
+        mask2 = seq_x >= embs
+        mask = mask1 | mask2
+        mask = torch.broadcast_to(mask[..., None], (bsz, seq, seq, self.num_class)).to(span_repr.device)
+
+        # bsz * word_cnt * word_cnt * hidden_dimension(256) into transformer encoder
+        trans_repr = span_repr.reshape(bsz, seq * seq, hd)
+        span_repr = self.trans(trans_repr.permute(1, 0, 2), src_len=embeds_length, attn_pattern="samehandt").permute(1, 0, 2)
+        span_repr = span_repr.reshape(bsz, seq, seq, hd)
+
+        # bsz * word_cnt * word_cnt * hidden_dimension(1024) -> bsz * word_cnt * word_cnt * class
+        logit = self.classifier(span_repr)
+
+        return logit, mask
+
+
+class SpanAttsubspan(VanillaSpanMax):
+    def __init__(self, bert_model_path, encoder_config_dict,
+                 num_class, score_setting, loss_config):
+        super(SpanAttsubspan, self).__init__(bert_model_path,
+                                             encoder_config_dict,
+                                             num_class,
+                                             score_setting,
+                                             loss_config)
+        self.linear_proj = MLP(self.hidden_dim, self._hidden_dim, self._hidden_dim, 2, self.dropout, self.act)
+        self.classifier = MLP(self._hidden_dim, 64, self.num_class, 4)
+        self.tranheads = 4
+        self.tranlayers = 4
+        trans_encoder_layer = myTransformerEncoderLayer(d_model=256, nhead=self.tranheads)
+        trans_layernorm = nn.LayerNorm(256)
+        self.trans = myTransformerEncoder(trans_encoder_layer, num_layers=self.tranlayers, norm=trans_layernorm)
+
+    def get_class_position(self, input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
+                           context_ce_mask, context_subword_group, context_map,
+                           input_word, input_char, input_pos,
+                           l_input_word, l_input_char, l_input_pos,
+                           r_input_word, r_input_char, r_input_pos,
+                           bert_embed=None):
+        memory = self.encoder(input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
+                              context_ce_mask, context_subword_group, context_map,
+                              input_word, input_char, input_pos,
+                              l_input_word, l_input_char, l_input_pos,
+                              r_input_word, r_input_char, r_input_pos,
+                              bert_embed)
+
+        embeds_length = (input_word != max(input_word.view(-1))).sum(1)
+        proj_repr = self.linear_proj(memory)
+        bsz, seq, hd = proj_repr.size()
+
+        # bsz * word_cnt * hidden_dimension(1024) -> bsz * word_cnt * word_cnt * hidden_dimension(256)
+        tmp_proj_repr = proj_repr
+        span_repr = torch.zeros(bsz, seq, seq, hd).to(memory.device)
+        for i in range(proj_repr.size()[1]):
+            # tmp_proj_repr = (tmp_proj_repr[:, 0:seq - i, :] * i + proj_repr[:, i:, :]) / (i + 1)
+            tmp_proj_repr = torch.maximum(proj_repr[:, i:, :], tmp_proj_repr[:, 0:seq - i, :])
+            span_repr[:, range(seq - i), range(i, seq), :] = tmp_proj_repr
+
+        # create src_key_mask to identify illegal span with True
+        seq_t = torch.arange(seq)
+        seq_x = torch.broadcast_to(seq_t[None, None, ...], (bsz, seq, seq))
+        seq_y = torch.broadcast_to(seq_t[None, ..., None], (bsz, seq, seq))
+        mask1 = seq_x < seq_y
+        embs = torch.broadcast_to(embeds_length[:, None, None], (bsz, seq, seq)).to(seq_x.device)
+        mask2 = seq_x >= embs
+        mask = mask1 | mask2
+        mask = torch.broadcast_to(mask[..., None], (bsz, seq, seq, self.num_class)).to(span_repr.device)
+
+        # bsz * word_cnt * word_cnt * hidden_dimension(256) into transformer encoder
+        trans_repr = span_repr.reshape(bsz, seq * seq, hd)
+        span_repr = self.trans(trans_repr.permute(1, 0, 2), src_len=embeds_length, attn_pattern="subspan").permute(1, 0, 2)
+        span_repr = span_repr.reshape(bsz, seq, seq, hd)
+
+        # bsz * word_cnt * word_cnt * hidden_dimension(1024) -> bsz * word_cnt * word_cnt * class
+        logit = self.classifier(span_repr)
+
+        return logit, mask
+
+
+class SpanAttsibling(VanillaSpanMax):
+    def __init__(self, bert_model_path, encoder_config_dict,
+                 num_class, score_setting, loss_config):
+        super(SpanAttsibling, self).__init__(bert_model_path,
+                                             encoder_config_dict,
+                                             num_class,
+                                             score_setting,
+                                             loss_config)
+        self.linear_proj = MLP(self.hidden_dim, self._hidden_dim, self._hidden_dim, 2, self.dropout, self.act)
+        self.classifier = MLP(self._hidden_dim, 64, self.num_class, 4)
+        self.tranheads = 4
+        self.tranlayers = 4
+        trans_encoder_layer = myTransformerEncoderLayer(d_model=256, nhead=self.tranheads)
+        trans_layernorm = nn.LayerNorm(256)
+        self.trans = myTransformerEncoder(trans_encoder_layer, num_layers=self.tranlayers, norm=trans_layernorm)
+
+    def get_class_position(self, input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
+                           context_ce_mask, context_subword_group, context_map,
+                           input_word, input_char, input_pos,
+                           l_input_word, l_input_char, l_input_pos,
+                           r_input_word, r_input_char, r_input_pos,
+                           bert_embed=None):
+        memory = self.encoder(input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
+                              context_ce_mask, context_subword_group, context_map,
+                              input_word, input_char, input_pos,
+                              l_input_word, l_input_char, l_input_pos,
+                              r_input_word, r_input_char, r_input_pos,
+                              bert_embed)
+
+        embeds_length = (input_word != max(input_word.view(-1))).sum(1)
+        proj_repr = self.linear_proj(memory)
+        bsz, seq, hd = proj_repr.size()
+
+        # bsz * word_cnt * hidden_dimension(1024) -> bsz * word_cnt * word_cnt * hidden_dimension(256)
+        tmp_proj_repr = proj_repr
+        span_repr = torch.zeros(bsz, seq, seq, hd).to(memory.device)
+        for i in range(proj_repr.size()[1]):
+            # tmp_proj_repr = (tmp_proj_repr[:, 0:seq - i, :] * i + proj_repr[:, i:, :]) / (i + 1)
+            tmp_proj_repr = torch.maximum(proj_repr[:, i:, :], tmp_proj_repr[:, 0:seq - i, :])
+            span_repr[:, range(seq - i), range(i, seq), :] = tmp_proj_repr
+
+        # create src_key_mask to identify illegal span with True
+        seq_t = torch.arange(seq)
+        seq_x = torch.broadcast_to(seq_t[None, None, ...], (bsz, seq, seq))
+        seq_y = torch.broadcast_to(seq_t[None, ..., None], (bsz, seq, seq))
+        mask1 = seq_x < seq_y
+        embs = torch.broadcast_to(embeds_length[:, None, None], (bsz, seq, seq)).to(seq_x.device)
+        mask2 = seq_x >= embs
+        mask = mask1 | mask2
+        mask = torch.broadcast_to(mask[..., None], (bsz, seq, seq, self.num_class)).to(span_repr.device)
+
+        # bsz * word_cnt * word_cnt * hidden_dimension(256) into transformer encoder
+        trans_repr = span_repr.reshape(bsz, seq * seq, hd)
+        span_repr = self.trans(trans_repr.permute(1, 0, 2), src_len=embeds_length, attn_pattern="sibling").permute(1, 0, 2)
+        span_repr = span_repr.reshape(bsz, seq, seq, hd)
+
+        # bsz * word_cnt * word_cnt * hidden_dimension(1024) -> bsz * word_cnt * word_cnt * class
+        logit = self.classifier(span_repr)
+
         return logit, mask

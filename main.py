@@ -16,7 +16,7 @@ from evaluation import decode, metric, write_predict
 from train_parser import generate_parser, generate_config, generate_loss_config
 from train_utils import generate_output_folder_name, generate_optimizer_scheduler
 from model.span import SpanModel
-from model.span_att_v2 import SpanAttModelV2, SpanAttModelV3, VanillaSpanMax, VanillaSpanMean, SpanAttInToken
+from model.span_att_v2 import SpanAttModelV2, SpanAttModelV3, VanillaSpanMax, VanillaSpanMean, SpanAttInToken, SpanAttsamehandt, SpanAttsubspan, SpanAttsibling 
 from input_util import prepare_input
 from train_utils import main_name, weight_scheduler
 import random
@@ -38,7 +38,7 @@ def run(args):
 
     output_basename = generate_output_folder_name(args)
     print(output_basename)
-    writer = SummaryWriter(comment=output_basename[0:15])
+    writer = SummaryWriter(comment=output_basename[0:200])
     output_path = os.path.join(args.output_base_dir, output_basename)
 
     if os.path.exists(f'{output_path}/metric_log'):
@@ -124,6 +124,18 @@ def run(args):
                                 loss_config=loss_config_dict).to(args.device)
     if args.model == "SpanAttInToken":
         model = SpanAttInToken(args.bert_name_or_path, encoder_config_dict,
+                                    len(train_dataset.type2id), score_setting,
+                                    loss_config=loss_config_dict).to(args.device)
+    if args.model == "SpanAttsamehandt":
+        model = SpanAttsamehandt(args.bert_name_or_path, encoder_config_dict,
+                                    len(train_dataset.type2id), score_setting,
+                                    loss_config=loss_config_dict).to(args.device)
+    if args.model == "SpanAttsubspan":
+        model = SpanAttsubspan(args.bert_name_or_path, encoder_config_dict,
+                                    len(train_dataset.type2id), score_setting,
+                                    loss_config=loss_config_dict).to(args.device)
+    if args.model == "SpanAttsibling":
+        model = SpanAttsibling(args.bert_name_or_path, encoder_config_dict,
                                     len(train_dataset.type2id), score_setting,
                                     loss_config=loss_config_dict).to(args.device)
     # check how model work in generate_optimizer_scheduler
