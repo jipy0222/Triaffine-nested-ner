@@ -16,7 +16,7 @@ from evaluation import decode, metric, write_predict
 from train_parser import generate_parser, generate_config, generate_loss_config
 from train_utils import generate_output_folder_name, generate_optimizer_scheduler
 from model.span import SpanModel
-from model.span_att_v2 import SpanAttModelV2, SpanAttModelV3, VanillaSpanMax, VanillaSpanMean, SpanAttInToken, SpanAttsamehandt, SpanAttsubspan, SpanAttsibling 
+from model.span_att_v2 import SpanAttModelV2, SpanAttModelV3, VanillaSpanMax, VanillaSpanMean, SpanAttfullyconnect, SpanAttInToken, SpanAttsamehandt, SpanAttsubspan, SpanAttsibling 
 from input_util import prepare_input
 from train_utils import main_name, weight_scheduler
 import random
@@ -122,6 +122,10 @@ def run(args):
         model = VanillaSpanMean(args.bert_name_or_path, encoder_config_dict,
                                 len(train_dataset.type2id), score_setting,
                                 loss_config=loss_config_dict).to(args.device)
+    if args.model == "SpanAttfullyconnect":
+        model = SpanAttfullyconnect(args.bert_name_or_path, encoder_config_dict,
+                                    len(train_dataset.type2id), score_setting,
+                                    loss_config=loss_config_dict).to(args.device)
     if args.model == "SpanAttInToken":
         model = SpanAttInToken(args.bert_name_or_path, encoder_config_dict,
                                     len(train_dataset.type2id), score_setting,
@@ -153,8 +157,9 @@ def run(args):
     best_epoch_idx = 0
 
     for epoch_idx in range(1, args.train_epoch + 1):
-        epoch_dev_metric, epoch_test_metric, steps = train_one_epoch(model, steps, train_dataloader, dev_dataloader, test_dataloader, optimizer, scheduler, writer, args, epoch_idx, ema)
+        epoch_train_metric, epoch_dev_metric, epoch_test_metric, steps = train_one_epoch(model, steps, train_dataloader, dev_dataloader, test_dataloader, optimizer, scheduler, writer, args, epoch_idx, ema)
         
+        print('Train_Epoch' + str(epoch_idx), epoch_train_metric)
         print('Dev_Epoch' + str(epoch_idx), epoch_dev_metric)
         print('Test_Epoch' + str(epoch_idx), epoch_test_metric)
         with open(os.path.join(output_path, 'metric_log'), 'a+', encoding='utf-8') as f:
@@ -259,10 +264,14 @@ def train_one_epoch(model, steps, train_dataloader, dev_dataloader, test_dataloa
             model.zero_grad()
         steps += 1
         
+    train_strict, train_relax = decode(train_dataloader, model, args, ema)
     dev_strict, dev_relax = decode(dev_dataloader, model, args, ema)
     write_predict(dev_strict, os.path.join(output_path, f'dev_{epoch_idx}_predict.txt'))
     test_strict, test_relax = decode(test_dataloader, model, args, ema)
     write_predict(test_strict, os.path.join(output_path, f'test_{epoch_idx}_predict.txt'))
+    train_metric = metric(train_dataloader.dataset, train_strict)
+    if train_relax:
+        train_metric = {**train_metric, **metric(train_dataloader.dataset, train_relax, "relax")}
     dev_metric = metric(dev_dataloader.dataset, dev_strict)
     if dev_relax:
         dev_metric = {**dev_metric, **metric(dev_dataloader.dataset, dev_relax, "relax")}
@@ -277,7 +286,7 @@ def train_one_epoch(model, steps, train_dataloader, dev_dataloader, test_dataloa
     for key in test_metric:
         writer.add_scalar('test_' + key, test_metric[key])
 
-    return dev_metric, test_metric, steps
+    return train_metric, dev_metric, test_metric, steps
 
 
 def main():

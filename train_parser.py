@@ -8,7 +8,7 @@ def generate_parser():
                         choices=["ace05", "ace04", "genia91", "kbp"],
                         help="Dataset version.")
     parser.add_argument("--model", type=str, default="SpanModel",
-                        choices=["SpanModel", "SpanAttModelV3", "VanillaSpanMax", "VanillaSpanMean", "SpanAttInToken", "SpanAttsamehandt", "SpanAttsubspan", "SpanAttsibling"])
+                        choices=["SpanModel", "SpanAttModelV3", "VanillaSpanMax", "VanillaSpanMean", "SpanAttfullyconnect", "SpanAttInToken", "SpanAttsamehandt", "SpanAttsubspan", "SpanAttsibling"])
     parser.add_argument("--schema", type=str, default="span",
                         choices=["span"])
     parser.add_argument("--soft_iou", type=float, default=0.7)
@@ -108,6 +108,9 @@ def generate_parser():
     # span_att
     parser.add_argument("--span_layer_count", type=int, default=2)
     parser.add_argument("--max_span_count", type=int, default=30)
+    parser.add_argument("--nhead", type=int, default=2)
+    parser.add_argument("--nlayer", type=int, default=2)
+    parser.add_argument("--span_pooling", type=str, default="max", choices=["max", "mean"])
     parser.add_argument("--share_parser", action="store_true")
     parser.add_argument("--unscale", action="store_true")  # for transformer not tri-affine attention
     parser.add_argument("--scale", type=str, default="none",
@@ -279,6 +282,9 @@ def generate_config(args):
     other_config = {'prenorm': args.pre_norm,
                     'span_layer_count': args.span_layer_count,
                     'max_span_count': args.max_span_count,
+                    'nlayer': args.nlayer,
+                    'nhead': args.nhead,
+                    'span_pooling': args.span_pooling,
                     'share_parser': args.share_parser,
                     'unscale': args.unscale,
                     'act': args.act}

@@ -42,6 +42,9 @@ class NestedNERDataset(Dataset):
         self.max_word_count = 200
         self.max_char_count = 70
         self.max_entity_count = 30
+        # self.max_word_count = 150
+        # self.max_char_count = 50
+        # self.max_entity_count = 20
         
         self.token_schema = token_schema
         assert token_schema in ['BE', 'BIE', 'BIES',
@@ -85,7 +88,17 @@ class NestedNERDataset(Dataset):
         with open(file_path, "r") as f:
             df = ujson.load(f)
         self.len = len(df)
-        return df
+        smalllen = int(0.2*self.len)
+        with open(file_path, "r") as f:
+            newdf = ujson.load(f)[:smalllen]
+        self.len = len(newdf)
+        return newdf
+
+    # def _load_file(self, file_path):
+    #     with open(file_path, "r") as f:
+    #         df = ujson.load(f)
+    #     self.len = len(df)
+    #     return df
 
     def __len__(self):
         return self.len

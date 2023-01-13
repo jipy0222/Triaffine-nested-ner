@@ -691,6 +691,108 @@ class VanillaSpanMean(VanillaSpanMax):
         return logit, mask
 
 
+class SpanAttfullyconnect(VanillaSpanMax):
+    def __init__(self, bert_model_path, encoder_config_dict,
+                 num_class, score_setting, loss_config):
+        super(SpanAttfullyconnect, self).__init__(bert_model_path,
+                                             encoder_config_dict,
+                                             num_class,
+                                             score_setting,
+                                             loss_config)
+        self.linear_proj = MLP(self.hidden_dim, self._hidden_dim, self._hidden_dim, 2, self.dropout, self.act)
+        self.classifier = MLP(self._hidden_dim, 64, self.num_class, 4)
+        self.tranheads = self.encoder_config_dict[5].get('nhead', 2)
+        self.tranlayers = self.encoder_config_dict[5].get('nlayer', 2)
+        self.pooling = self.encoder_config_dict[5].get('span_pooling', 'max')
+        trans_encoder_layer = nn.TransformerEncoderLayer(d_model=256, nhead=self.tranheads)
+        trans_layernorm = nn.LayerNorm(256)
+        self.trans = nn.TransformerEncoder(trans_encoder_layer, num_layers=self.tranlayers, norm=trans_layernorm)
+
+    def get_class_position(self, input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
+                           context_ce_mask, context_subword_group, context_map,
+                           input_word, input_char, input_pos,
+                           l_input_word, l_input_char, l_input_pos,
+                           r_input_word, r_input_char, r_input_pos,
+                           bert_embed=None):
+        # 0 .get memory: bsz * word_cnt * hidden_size(1024)
+        # 1. projection
+        # 2. make span representation matrix by different methods(try max first)
+        # 3. make logit matrix(bsz * word_cnt * word_cnt * type)
+        # 4. class_loss = self.class_loss_fn(logit, label)
+        #    return class_loss
+        memory = self.encoder(input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
+                              context_ce_mask, context_subword_group, context_map,
+                              input_word, input_char, input_pos,
+                              l_input_word, l_input_char, l_input_pos,
+                              r_input_word, r_input_char, r_input_pos,
+                              bert_embed)
+
+        embeds_length = (input_word != max(input_word.view(-1))).sum(1)
+        proj_repr = self.linear_proj(memory)
+        bsz, seq, hd = proj_repr.size()
+
+        # bsz * word_cnt * hidden_dimension(1024) -> bsz * word_cnt * word_cnt * hidden_dimension(256)
+        tmp_proj_repr = proj_repr
+        span_repr = torch.zeros(bsz, seq, seq, hd).to(memory.device)
+        if self.pooling == 'max':
+            for i in range(proj_repr.size()[1]):
+                tmp_proj_repr = torch.maximum(proj_repr[:, i:, :], tmp_proj_repr[:, 0:seq - i, :])
+                span_repr[:, range(seq - i), range(i, seq), :] = tmp_proj_repr
+        elif self.pooling == 'mean':
+            for i in range(proj_repr.size()[1]):
+                tmp_proj_repr = (tmp_proj_repr[:, 0:seq - i, :] * i + proj_repr[:, i:, :]) / (i + 1)
+                span_repr[:, range(seq - i), range(i, seq), :] = tmp_proj_repr
+        else:
+            raise RuntimeError("Invalid span pooling method.")
+
+        # create src_key_mask to identify illegal span with True
+        seq_t = torch.arange(seq)
+        seq_x = torch.broadcast_to(seq_t[None, None, ...], (bsz, seq, seq))
+        seq_y = torch.broadcast_to(seq_t[None, ..., None], (bsz, seq, seq))
+        mask1 = seq_x < seq_y
+        embs = torch.broadcast_to(embeds_length[:, None, None], (bsz, seq, seq)).to(seq_x.device)
+        mask2 = seq_x >= embs
+        mask = mask1 | mask2
+        src_key_mask = mask.reshape(bsz, seq*seq).to(span_repr.device)
+        mask = torch.broadcast_to(mask[..., None], (bsz, seq, seq, self.num_class)).to(span_repr.device)
+
+        # create src_mask to implement attention schema
+        # t = torch.arange(seq).repeat(seq)
+        # t1 = torch.broadcast_to(t[None, ...], (seq*seq, seq*seq))
+        # t2 = torch.broadcast_to(t[..., None], (seq*seq, seq*seq))
+        # src_mask1 = t1 <= t2
+        # h = torch.arange(seq)
+        # h = torch.broadcast_to(h[..., None], (seq, seq)).reshape(-1)
+        # h1 = torch.broadcast_to(h[None, ...], (seq*seq, seq*seq))
+        # h2 = torch.broadcast_to(h[..., None], (seq*seq, seq*seq))
+        # src_mask2 = h1 >= h2
+        # src_mask3 = ~(src_mask1 & src_mask2)
+        # c = torch.ones(seq*seq)
+        # for i in range(0, seq*seq, seq+1):
+        #     c[i] = 0
+        # oric = torch.broadcast_to(c[None, ...], (seq*seq, seq*seq)) > 0
+        # src_mask = (oric | src_mask3).to(span_repr.device)
+        # src_mask = torch.broadcast_to(src_mask[None, ...], (bsz, seq * seq, seq * seq))
+        
+        # src_mask4 = torch.broadcast_to(src_key_mask[..., None], (bsz, seq * seq, seq * seq))
+        # src_mask = src_mask & (~src_mask4)
+        # src_mask = torch.broadcast_to(src_mask[:, None, ...], (bsz, self.tranheads, seq*seq, seq*seq))
+        # src_mask = src_mask.reshape(bsz*self.tranheads, seq*seq, seq*seq).to(span_repr.device)
+
+        # bsz * word_cnt * word_cnt * hidden_dimension(256) into transformer encoder
+        trans_repr = span_repr.reshape(bsz, seq * seq, hd)
+        # src_key_mask = src_key_mask.reshape(bsz, seq * seq)
+        span_repr = self.trans(trans_repr.permute(1, 0, 2), src_key_padding_mask=src_key_mask).permute(1, 0, 2)
+        span_repr = span_repr.reshape(bsz, seq, seq, hd)
+
+        # bsz * word_cnt * word_cnt * hidden_dimension(1024) -> bsz * word_cnt * word_cnt * class
+        logit = self.classifier(span_repr)
+        # logit = logit.masked_fill_(mask, -1e6)
+
+        # logit = F.softmax(logit, dim=-1)
+        return logit, mask
+
+
 class SpanAttInToken(VanillaSpanMax):
     def __init__(self, bert_model_path, encoder_config_dict,
                  num_class, score_setting, loss_config):
@@ -701,8 +803,9 @@ class SpanAttInToken(VanillaSpanMax):
                                              loss_config)
         self.linear_proj = MLP(self.hidden_dim, self._hidden_dim, self._hidden_dim, 2, self.dropout, self.act)
         self.classifier = MLP(self._hidden_dim, 64, self.num_class, 4)
-        self.tranheads = 4
-        self.tranlayers = 4
+        self.tranheads = self.encoder_config_dict[5].get('nhead', 2)
+        self.tranlayers = self.encoder_config_dict[5].get('nlayer', 2)
+        self.pooling = self.encoder_config_dict[5].get('span_pooling', 'max')
         trans_encoder_layer = myTransformerEncoderLayer(d_model=256, nhead=self.tranheads)
         trans_layernorm = nn.LayerNorm(256)
         self.trans = myTransformerEncoder(trans_encoder_layer, num_layers=self.tranlayers, norm=trans_layernorm)
@@ -733,10 +836,16 @@ class SpanAttInToken(VanillaSpanMax):
         # bsz * word_cnt * hidden_dimension(1024) -> bsz * word_cnt * word_cnt * hidden_dimension(256)
         tmp_proj_repr = proj_repr
         span_repr = torch.zeros(bsz, seq, seq, hd).to(memory.device)
-        for i in range(proj_repr.size()[1]):
-            # tmp_proj_repr = (tmp_proj_repr[:, 0:seq - i, :] * i + proj_repr[:, i:, :]) / (i + 1)
-            tmp_proj_repr = torch.maximum(proj_repr[:, i:, :], tmp_proj_repr[:, 0:seq - i, :])
-            span_repr[:, range(seq - i), range(i, seq), :] = tmp_proj_repr
+        if self.pooling == 'max':
+            for i in range(proj_repr.size()[1]):
+                tmp_proj_repr = torch.maximum(proj_repr[:, i:, :], tmp_proj_repr[:, 0:seq - i, :])
+                span_repr[:, range(seq - i), range(i, seq), :] = tmp_proj_repr
+        elif self.pooling == 'mean':
+            for i in range(proj_repr.size()[1]):
+                tmp_proj_repr = (tmp_proj_repr[:, 0:seq - i, :] * i + proj_repr[:, i:, :]) / (i + 1)
+                span_repr[:, range(seq - i), range(i, seq), :] = tmp_proj_repr
+        else:
+            raise RuntimeError("Invalid span pooling method.")
 
         # create src_key_mask to identify illegal span with True
         seq_t = torch.arange(seq)
@@ -796,8 +905,9 @@ class SpanAttsamehandt(VanillaSpanMax):
                                              loss_config)
         self.linear_proj = MLP(self.hidden_dim, self._hidden_dim, self._hidden_dim, 2, self.dropout, self.act)
         self.classifier = MLP(self._hidden_dim, 64, self.num_class, 4)
-        self.tranheads = 4
-        self.tranlayers = 4
+        self.tranheads = self.encoder_config_dict[5].get('nhead', 2)
+        self.tranlayers = self.encoder_config_dict[5].get('nlayer', 2)
+        self.pooling = self.encoder_config_dict[5].get('span_pooling', 'max')
         trans_encoder_layer = myTransformerEncoderLayer(d_model=256, nhead=self.tranheads)
         trans_layernorm = nn.LayerNorm(256)
         self.trans = myTransformerEncoder(trans_encoder_layer, num_layers=self.tranlayers, norm=trans_layernorm)
@@ -822,10 +932,16 @@ class SpanAttsamehandt(VanillaSpanMax):
         # bsz * word_cnt * hidden_dimension(1024) -> bsz * word_cnt * word_cnt * hidden_dimension(256)
         tmp_proj_repr = proj_repr
         span_repr = torch.zeros(bsz, seq, seq, hd).to(memory.device)
-        for i in range(proj_repr.size()[1]):
-            # tmp_proj_repr = (tmp_proj_repr[:, 0:seq - i, :] * i + proj_repr[:, i:, :]) / (i + 1)
-            tmp_proj_repr = torch.maximum(proj_repr[:, i:, :], tmp_proj_repr[:, 0:seq - i, :])
-            span_repr[:, range(seq - i), range(i, seq), :] = tmp_proj_repr
+        if self.pooling == 'max':
+            for i in range(proj_repr.size()[1]):
+                tmp_proj_repr = torch.maximum(proj_repr[:, i:, :], tmp_proj_repr[:, 0:seq - i, :])
+                span_repr[:, range(seq - i), range(i, seq), :] = tmp_proj_repr
+        elif self.pooling == 'mean':
+            for i in range(proj_repr.size()[1]):
+                tmp_proj_repr = (tmp_proj_repr[:, 0:seq - i, :] * i + proj_repr[:, i:, :]) / (i + 1)
+                span_repr[:, range(seq - i), range(i, seq), :] = tmp_proj_repr
+        else:
+            raise RuntimeError("Invalid span pooling method.")
 
         # create src_key_mask to identify illegal span with True
         seq_t = torch.arange(seq)
