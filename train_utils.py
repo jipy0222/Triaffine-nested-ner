@@ -41,24 +41,24 @@ def generate_output_folder_name(args):
                     args.score]
         if args.negative_sampling:
             args_list += [f"negd_{args.hard_neg_dist}"]
-    if args.model in ["SpanAttModel", "SpanAttModelV2", "SpanAttModelV3", "VanillaSpanMax", "VanillaSpanMean", "SpanAttfullyconnect", "SpanAttInToken", "SpanAttsamehandt", "SpanAttsubspan", "SpanAttsibling"]:
+    if args.model in ["VanillaSpanBase", "SpanAttfullyconnect", "SpanAttschema"]:
         args_list = [args.version,
                     args.model,
                     main_name_list(args.bert_name_or_path),
                     args.class_loss_weight,
-                    args.filter_loss_weight,
-                    args.span_layer_count,
-                    args.max_span_count]
-        if args.unscale:
-            args_list += ['uns']
+                    args.filter_loss_weight]
+                    # args.span_layer_count,
+                    # args.max_span_count]
+        # if args.unscale:
+        #     args_list += ['uns']
     if args.not_correct_bias:
         args_list += ['ncb']
     if args.max_grad_norm != 0.1:
         args_list += [f'norm_{args.max_grad_norm}']
     if args.score in ["tri_attention", "tri_affine"]:
-        args_list += [args.att_dim, args.init_std]
-        if args.layer_norm:
-            args_list += ['ln']
+        # args_list += [args.att_dim, args.init_std]
+        # if args.layer_norm:
+        #     args_list += ['ln']
         if args.no_tri_mask:
             args_list += ['ntm']
     # encoder related
@@ -73,12 +73,12 @@ def generate_output_folder_name(args):
         args_list += [f'reinit_{args.reinit}']
     if args.freeze_bert:
         args_list += ['frz']
-    if args.rel_pos_attn or args.rel_pos:
-        if args.rel_pos_attn:
-            args_list += ['relatt']
-        if args.rel_pos:
-            args_list += ['rel']
-        args_list += [args.rel_k]
+    # if args.rel_pos_attn or args.rel_pos:
+    #     if args.rel_pos_attn:
+    #         args_list += ['relatt']
+    #     if args.rel_pos:
+    #         args_list += ['rel']
+    #     args_list += [args.rel_k]
     if args.word:
         args_list += [f'word_{args.word_dp}']
         if args.word_embed:
@@ -96,22 +96,22 @@ def generate_output_folder_name(args):
         args_list += [args.act]
     if args.ema > 0.:
         args_list += [f'ema_{args.ema}']
-    if args.share_parser:
-         args_list += ['sps']
-    if args.type_attention:
-        args_list += ['type_att']
+    # if args.share_parser:
+    #      args_list += ['sps']
+    # if args.type_attention:
+    #     args_list += ['type_att']
     if args.token_aux:
         args_list += [f'taux_{args.token_schema}_{args.token_aux_weight}']
-    if args.trans_aux:
-        args_list += [f'traux_{args.trans_aux_weight}']
+    # if args.trans_aux:
+    #     args_list += [f'traux_{args.trans_aux_weight}']
     if args.warmup_ratio != 0.1:
         args_list += [f'warm{args.warmup_ratio}']
     if args.aux_loss and args.model.find("DETR") >= 0:
         args_list += ['aux']
-    if args.pre_norm:
-        args_list += ['prenorm']
-    if args.scale != "none":
-        args_list += [args.scale]
+    # if args.pre_norm:
+    #     args_list += ['prenorm']
+    # if args.scale != "none":
+    #     args_list += [args.scale]
     if args.weight_scheduler != "none":
         args_list += [args.weight_scheduler]
     if args.loss == "ce":
@@ -136,18 +136,20 @@ def generate_output_folder_name(args):
                   f'bsz_{int(args.batch_size) * int(args.gradient_accumulation_steps)}']
     if args.no_lr_decay:
         args_list += ['nld']
-    if args.reduce_last:
-        args_list += ['rdl']
+    # if args.reduce_last:
+    #     args_list += ['rdl']
     if args.seed != -1:
         args_list += [f's{args.seed}']
-    if args.no_linear_class:
-        args_list += ['nolin']
+    # if args.no_linear_class:
+    #     args_list += ['nolin']
     args_list += ['tti'] # token_type_ids
     args_list += [f'mlpdp_{args.dp}']
-    args_list += [args.tag]
     args_list += [args.nhead]
     args_list += [args.nlayer]
     args_list += [args.span_pooling]
+    args_list += [args.attn_schema]
+    args_list += [args.span_pos_embed]
+    args_list += [args.comment]
     output_basename = "-".join([str(arg) for arg in args_list])
     return output_basename
     

@@ -32,9 +32,9 @@ def prepare_input(batch, args=None, train=True, accelerator=False, device=None):
         inputs['label'] = batch_lst[17]
         if args.model == "TokenModel" or args.token_aux:
             inputs['token_label'] = batch_lst[18]
-        if args.trans_aux:
-            inputs['head_trans'] = batch_lst[22]
-            inputs['tail_trans'] = batch_lst[23]
+        # if args.trans_aux:
+        #     inputs['head_trans'] = batch_lst[22]
+        #     inputs['tail_trans'] = batch_lst[23]
     if args.freeze_bert:
         inputs['bert_embed'] = batch_lst[-1]
     return inputs

@@ -9,3 +9,9 @@ runs/
 __pycache__/
 train.slurm
 train2.slurm
+257691.err
+257691.out
+258482.err
+258482.out
+258853.err
+258853.out

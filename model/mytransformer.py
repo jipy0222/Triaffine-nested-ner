@@ -1553,15 +1553,28 @@ def mymulti_head_attention_forward_grouppadding(
     seq_x = torch.broadcast_to(seq_t[None, None, ...], (bsz, seq, seq))
     seq_y = torch.broadcast_to(seq_t[None, ..., None], (bsz, seq, seq))
     
-    embs = torch.broadcast_to(src_len[:, None, None], (bsz, seq, seq))
-    mask2 = seq_x >= embs
-    mask2_for_padding = mask2.reshape(bsz, seq*seq)
-    mask2_for_padding = torch.broadcast_to(mask2_for_padding[:, None, ...], (bsz, seq*seq, seq*seq))
-    mask3 = seq_y >= embs
-    mask_for_padding = mask2 & mask3
-    mask_for_padding = mask_for_padding.reshape(bsz, seq*seq)
-    mask_for_padding = torch.broadcast_to(~mask_for_padding[..., None], (bsz, seq*seq, seq*seq))
-    mask_for_padding = mask_for_padding & mask2_for_padding
+    if attn_pattern in ["insidetoken", "samehandt", "subspan"]:
+        embs = torch.broadcast_to(src_len[:, None, None], (bsz, seq, seq))
+        mask2 = seq_x >= embs
+        mask2_for_padding = mask2.reshape(bsz, seq*seq)
+        mask2_for_padding = torch.broadcast_to(mask2_for_padding[:, None, ...], (bsz, seq*seq, seq*seq))
+        mask3 = seq_y >= embs
+        mask_for_padding = mask2 & mask3
+        mask_for_padding = mask_for_padding.reshape(bsz, seq*seq)
+        mask_for_padding = torch.broadcast_to(~mask_for_padding[..., None], (bsz, seq*seq, seq*seq))
+        mask_for_padding = mask_for_padding & mask2_for_padding
+    elif attn_pattern == "sibling":
+        embs = torch.broadcast_to(src_len[:, None, None], (bsz, seq, seq))
+        mask2 = seq_x >= embs
+        mask2_for_padding = mask2.reshape(bsz, seq*seq)
+        mask2_for_padding = torch.broadcast_to(mask2_for_padding[:, None, ...], (bsz, seq*seq, seq*seq))
+        mask3 = ((seq_y == 0) & (seq_x >= embs-1)) | ((seq_y >= embs + 1) & (seq_y <= seq_x))
+        mask_for_padding = mask3.reshape(bsz, seq*seq)
+        mask_for_padding = torch.broadcast_to(~mask_for_padding[..., None], (bsz, seq*seq, seq*seq))
+        mask_for_padding = mask_for_padding & mask2_for_padding
+    else:
+        raise RuntimeError("attention pattern not defined.")
+
 
     # adjust dropout probability
     if not training:
@@ -1598,7 +1611,7 @@ def mymulti_head_attention_forward_grouppadding(
         h2 = torch.broadcast_to(h[..., None], (seq * seq, seq * seq))
         tempfilling = t - h + 1
         pattern_mask = ~((t1 <= t2) & (h1 >= h2))
-        c = torch.ones(seq * seq)
+        c = torch.ones(seq * seq).to(q.device)
         for i in range(0, seq * seq, seq + 1):
             c[i] = 0
         oric = torch.broadcast_to(c[None, ...], (seq * seq, seq * seq)) > 0
@@ -2077,10 +2090,588 @@ def mymulti_head_attention_forward_grouppadding(
             return complete_attn_output, None
 
     elif attn_pattern == "subspan":
-        pass
+
+        t = torch.arange(seq).repeat(seq).to(q.device)
+        t1 = torch.broadcast_to(t[None, ...], (seq * seq, seq * seq))
+        t2 = torch.broadcast_to(t[..., None], (seq * seq, seq * seq))
+        h = torch.arange(seq).to(q.device)
+        h = torch.broadcast_to(h[..., None], (seq, seq)).reshape(-1)
+        h1 = torch.broadcast_to(h[None, ...], (seq * seq, seq * seq))
+        h2 = torch.broadcast_to(h[..., None], (seq * seq, seq * seq))
+        tempfilling = t - h + 1
+        tempfilling = (tempfilling+1)*tempfilling / 2
+        pattern_mask = ~((t1 <= t2) & (h1 >= h2) & (h1 <= t1))
+        pattern_mask = torch.broadcast_to(pattern_mask[None, ...], (bsz, seq * seq, seq * seq))
+
+        q_repr = q.transpose(0, 1)
+        k_repr = k.transpose(0, 1)
+        v_repr = v.transpose(0, 1)
+
+        templength = 1
+        for i in range(1, seq + 1, 4):
+            if i >= seq / 2:
+                templength = i
+                break
+            
+            tgt_len, bsz, hd = query.shape
+            source_len, _, _ = key.shape
+            seq = int(math.sqrt(tgt_len))
+            lenlist = [i, i+1, i+2, i+3]
+            maxlen = lenlist[-1]
+            numofpattern = int((1+maxlen)*maxlen / 2)
+            lenmask = torch.ones(bsz, seq, seq).to(q.device)
+            total_span = 0
+            for item in lenlist:
+                total_span += (seq - item + 1)*bsz
+                lenmask[:, range(seq - item + 1), range(item - 1, seq)] = 0
+            lenmask = (lenmask > 0).reshape(bsz, seq * seq)
+            pattern_mask_legal = pattern_mask[~lenmask].reshape(bsz, int(total_span / bsz), seq * seq)
+
+            temp = torch.broadcast_to(tempfilling[None, ..., None], (bsz, seq*seq, numofpattern))
+            temp = temp[~lenmask].reshape(total_span, numofpattern)
+            temp2 = torch.arange(start=1, end=numofpattern+1, step=1).to(q.device)
+            temp2 = torch.broadcast_to(temp2[None, ...], (total_span, numofpattern))
+            filling_mask = (temp-temp2) >= 0
+
+            # initial complete q, k, v
+            complete_k = torch.zeros([total_span, numofpattern, embed_dim]).to(q.device)
+            complete_v = torch.zeros([total_span, numofpattern, embed_dim]).to(q.device)
+            complete_key_padding_mask = torch.ones([total_span, numofpattern]) > 0
+            complete_key_padding_mask = complete_key_padding_mask.to(q.device)
+
+            # construct complete_q
+            complete_q = q_repr[~lenmask].reshape(bsz, int(total_span/bsz), hd)
+            # bsz(2), total_span/bsz, hd(3), batch_inside_order: lexico order
+            complete_q = complete_q.reshape(total_span, 1, hd).transpose(0, 1)
+            # tgt_len(1), total_span, hd(3), total_span_inside_order: batch first, then lexico order
+
+            # construct complete_k
+            new_k_repr = torch.broadcast_to(k_repr[:, None, ...], (bsz, int(total_span/bsz), seq*seq, hd))
+            new_k_repr = new_k_repr[~pattern_mask_legal]
+            complete_k[filling_mask] = new_k_repr
+            complete_k = complete_k.transpose(0, 1)
+            # numnofpattern, total_span, hd(3), total_span_inside_order: batch first, then lexico order
+
+            # construct complete_v
+            new_v_repr = torch.broadcast_to(v_repr[:, None, ...], (bsz, int(total_span/bsz), seq*seq, hd))
+            new_v_repr = new_v_repr[~pattern_mask_legal]
+            complete_v[filling_mask] = new_v_repr
+            complete_v = complete_v.transpose(0, 1)
+            # numnofpattern, total_span, hd(3), total_span_inside_order: batch first, then lexico order
+
+            # construct complete_key_paddding_mask
+            new_mask_for_padding = mask_for_padding[~lenmask].reshape(bsz, int(total_span/bsz), seq*seq)
+            new_mask_for_padding = new_mask_for_padding[~pattern_mask_legal]
+            complete_key_padding_mask[filling_mask] = new_mask_for_padding
+
+            ori_bsz = bsz
+            tgt_len, bsz, embed_dim = complete_q.shape
+            source_len, _, _ = complete_k.shape
+
+            # prep key padding mask
+            if complete_key_padding_mask is not None and complete_key_padding_mask.dtype == torch.uint8:
+                warnings.warn("Byte tensor for key_padding_mask in myMultiheadAttention is deprecated. Use bool tensor instead.")
+                complete_key_padding_mask = complete_key_padding_mask.to(torch.bool)
+
+            # reshape q, k, v for multihead attention and make em batch first
+            complete_q = complete_q.contiguous().view(tgt_len, bsz * num_heads, head_dim).transpose(0, 1)
+            complete_k = complete_k.contiguous().view(complete_k.shape[0], bsz * num_heads, head_dim).transpose(0, 1)
+            complete_v = complete_v.contiguous().view(complete_v.shape[0], bsz * num_heads, head_dim).transpose(0, 1)
+
+            # skip related content about bias_k, bias_v, add_zero_attention
+            # update source sequence length after adjustments
+            source_len = complete_k.size(1)
+
+            # merge key padding and attention masks
+            if complete_key_padding_mask is not None:
+                assert complete_key_padding_mask.shape == (bsz, source_len), \
+                    f"expecting key_padding_mask shape of {(bsz, source_len)}, but got {complete_key_padding_mask.shape}"
+                complete_key_padding_mask = complete_key_padding_mask.view(bsz, 1, 1, source_len).   \
+                    expand(-1, num_heads, -1, -1).reshape(bsz * num_heads, 1, source_len)
+                attn_mask = complete_key_padding_mask
+
+            # convert mask to float
+            if attn_mask is not None and attn_mask.dtype == torch.bool:
+                new_attn_mask = torch.zeros_like(attn_mask, dtype=q.dtype)
+                new_attn_mask.masked_fill_(attn_mask, float("-inf"))
+                attn_mask = new_attn_mask
+
+            # (deep breath) calculate attention and out projection
+            attn_output, attn_output_weights = _scaled_dot_product_attention(complete_q, complete_k, complete_v, attn_mask, dropout_p)
+            attn_output = attn_output.transpose(0, 1).contiguous().view(tgt_len * bsz, embed_dim)
+            attn_output = F.linear(attn_output, out_proj_weight, out_proj_bias)
+            attn_output = attn_output.view(tgt_len, bsz, attn_output.size(1))
+
+            # do reverse and fill attn_ouput to complete_attn_ouput
+            attn_output = attn_output.transpose(0, 1).reshape(-1, hd)
+            lenmask_attn = lenmask.reshape(ori_bsz, seq, seq)
+            complete_attn_output[~lenmask_attn] = attn_output
+
+            bsz = ori_bsz
+        
+        for i in range(templength, seq + 1, 2):
+            if (i + 2) >= seq:
+                lenlist = []
+                for m in range(i, seq + 1):
+                    lenlist.append(m)
+            else:
+                lenlist = [i, i + 1]
+            
+            tgt_len, bsz, hd = query.shape
+            source_len, _, _ = key.shape
+            seq = int(math.sqrt(tgt_len))
+            maxlen = lenlist[-1]
+            numofpattern = int((1+maxlen)*maxlen / 2)
+            lenmask = torch.ones(bsz, seq, seq).to(q.device)
+            total_span = 0
+            for item in lenlist:
+                total_span += (seq - item + 1)*bsz
+                lenmask[:, range(seq - item + 1), range(item - 1, seq)] = 0
+            lenmask = (lenmask > 0).reshape(bsz, seq * seq)
+            pattern_mask_legal = pattern_mask[~lenmask].reshape(bsz, int(total_span / bsz), seq * seq)
+
+            temp = torch.broadcast_to(tempfilling[None, ..., None], (bsz, seq*seq, numofpattern))
+            temp = temp[~lenmask].reshape(total_span, numofpattern)
+            temp2 = torch.arange(start=1, end=numofpattern+1, step=1).to(q.device)
+            temp2 = torch.broadcast_to(temp2[None, ...], (total_span, numofpattern))
+            filling_mask = (temp-temp2) >= 0
+
+            # initial complete q, k, v
+            complete_k = torch.zeros([total_span, numofpattern, embed_dim]).to(q.device)
+            complete_v = torch.zeros([total_span, numofpattern, embed_dim]).to(q.device)
+            complete_key_padding_mask = torch.ones([total_span, numofpattern]) > 0
+            complete_key_padding_mask = complete_key_padding_mask.to(q.device)
+
+            # construct complete_q
+            complete_q = q_repr[~lenmask].reshape(bsz, int(total_span/bsz), hd)
+            # bsz(2), total_span/bsz, hd(3), batch_inside_order: lexico order
+            complete_q = complete_q.reshape(total_span, 1, hd).transpose(0, 1)
+            # tgt_len(1), total_span, hd(3), total_span_inside_order: batch first, then lexico order
+
+            # construct complete_k
+            new_k_repr = torch.broadcast_to(k_repr[:, None, ...], (bsz, int(total_span/bsz), seq*seq, hd))
+            new_k_repr = new_k_repr[~pattern_mask_legal]
+            complete_k[filling_mask] = new_k_repr
+            complete_k = complete_k.transpose(0, 1)
+            # numnofpattern, total_span, hd(3), total_span_inside_order: batch first, then lexico order
+
+            # construct complete_v
+            new_v_repr = torch.broadcast_to(v_repr[:, None, ...], (bsz, int(total_span/bsz), seq*seq, hd))
+            new_v_repr = new_v_repr[~pattern_mask_legal]
+            complete_v[filling_mask] = new_v_repr
+            complete_v = complete_v.transpose(0, 1)
+            # numnofpattern, total_span, hd(3), total_span_inside_order: batch first, then lexico order
+
+            # construct complete_key_paddding_mask
+            new_mask_for_padding = mask_for_padding[~lenmask].reshape(bsz, int(total_span/bsz), seq*seq)
+            new_mask_for_padding = new_mask_for_padding[~pattern_mask_legal]
+            complete_key_padding_mask[filling_mask] = new_mask_for_padding
+
+            ori_bsz = bsz
+            tgt_len, bsz, embed_dim = complete_q.shape
+            source_len, _, _ = complete_k.shape
+
+            # prep key padding mask
+            if complete_key_padding_mask is not None and complete_key_padding_mask.dtype == torch.uint8:
+                warnings.warn("Byte tensor for key_padding_mask in myMultiheadAttention is deprecated. Use bool tensor instead.")
+                complete_key_padding_mask = complete_key_padding_mask.to(torch.bool)
+
+            # reshape q, k, v for multihead attention and make em batch first
+            complete_q = complete_q.contiguous().view(tgt_len, bsz * num_heads, head_dim).transpose(0, 1)
+            complete_k = complete_k.contiguous().view(complete_k.shape[0], bsz * num_heads, head_dim).transpose(0, 1)
+            complete_v = complete_v.contiguous().view(complete_v.shape[0], bsz * num_heads, head_dim).transpose(0, 1)
+
+            # skip related content about bias_k, bias_v, add_zero_attention
+            # update source sequence length after adjustments
+            source_len = complete_k.size(1)
+
+            # merge key padding and attention masks
+            if complete_key_padding_mask is not None:
+                assert complete_key_padding_mask.shape == (bsz, source_len), \
+                    f"expecting key_padding_mask shape of {(bsz, source_len)}, but got {complete_key_padding_mask.shape}"
+                complete_key_padding_mask = complete_key_padding_mask.view(bsz, 1, 1, source_len).   \
+                    expand(-1, num_heads, -1, -1).reshape(bsz * num_heads, 1, source_len)
+                attn_mask = complete_key_padding_mask
+
+            # convert mask to float
+            if attn_mask is not None and attn_mask.dtype == torch.bool:
+                new_attn_mask = torch.zeros_like(attn_mask, dtype=q.dtype)
+                new_attn_mask.masked_fill_(attn_mask, float("-inf"))
+                attn_mask = new_attn_mask
+
+            # (deep breath) calculate attention and out projection
+            attn_output, attn_output_weights = _scaled_dot_product_attention(complete_q, complete_k, complete_v, attn_mask, dropout_p)
+            attn_output = attn_output.transpose(0, 1).contiguous().view(tgt_len * bsz, embed_dim)
+            attn_output = F.linear(attn_output, out_proj_weight, out_proj_bias)
+            attn_output = attn_output.view(tgt_len, bsz, attn_output.size(1))
+
+            # do reverse and fill attn_ouput to complete_attn_ouput
+            attn_output = attn_output.transpose(0, 1).reshape(-1, hd)
+            lenmask_attn = lenmask.reshape(ori_bsz, seq, seq)
+            complete_attn_output[~lenmask_attn] = attn_output
+
+            bsz = ori_bsz
+
+        complete_attn_output = complete_attn_output.reshape(bsz, seq*seq, embed_dim).transpose(0, 1)
+        
+        if need_weights:
+            # optionally average attention weights over heads
+            raise RuntimeError("Have not reverse and fill attention weights.")
+            # attn_output_weights = attn_output_weights.view(bsz, num_heads, tgt_len, source_len)
+            # if average_attn_weights:
+            #     attn_output_weights = attn_output_weights.sum(dim=1) / num_heads
+
+            # if not is_batched:
+            #     # squeeze the output if input was unbatched
+            #     attn_output = attn_output.squeeze(1)
+            #     attn_output_weights = attn_output_weights.squeeze(0)
+            # return attn_output, attn_output_weights
+        else:
+            if not is_batched:
+                # squeeze the output if input was unbatched
+                raise RuntimeError("Will not allow non-batched input.")
+            return complete_attn_output, None
 
     elif attn_pattern == "sibling":
-        pass
+
+        t = torch.arange(seq).repeat(seq).to(q.device)
+        t1 = torch.broadcast_to(t[None, ...], (seq * seq, seq * seq))
+        t2 = torch.broadcast_to(t[..., None], (seq * seq, seq * seq))
+        h = torch.arange(seq).to(q.device)
+        h = torch.broadcast_to(h[..., None], (seq, seq)).reshape(-1)
+        h1 = torch.broadcast_to(h[None, ...], (seq * seq, seq * seq))
+        h2 = torch.broadcast_to(h[..., None], (seq * seq, seq * seq))
+        tempfilling = t - h + 1
+        tempfilling = seq - tempfilling
+        pattern_mask = ~(((h1 == t2 + 1) | (t1 == h2 - 1)) & (h1 <= t1))
+        pattern_mask = torch.broadcast_to(pattern_mask[None, ...], (bsz, seq * seq, seq * seq))
+
+        q_repr = q.transpose(0, 1)
+        k_repr = k.transpose(0, 1)
+        v_repr = v.transpose(0, 1)
+
+        templength = 1
+        for i in range(1, seq + 1, 2):
+            if i >= seq / 2:
+                templength = i
+                break
+            
+            tgt_len, bsz, hd = query.shape
+            source_len, _, _ = key.shape
+            seq = int(math.sqrt(tgt_len))
+            lenlist = [i, i+1]
+            numofpattern = seq - lenlist[0]
+            lenmask = torch.ones(bsz, seq, seq).to(q.device)
+            total_span = 0
+            for item in lenlist:
+                total_span += (seq - item + 1)*bsz
+                lenmask[:, range(seq - item + 1), range(item - 1, seq)] = 0
+            lenmask = (lenmask > 0).reshape(bsz, seq * seq)
+            pattern_mask_legal = pattern_mask[~lenmask].reshape(bsz, int(total_span / bsz), seq * seq)
+
+            temp = torch.broadcast_to(tempfilling[None, ..., None], (bsz, seq*seq, numofpattern))
+            temp = temp[~lenmask].reshape(total_span, numofpattern)
+            temp2 = torch.arange(start=1, end=numofpattern+1, step=1).to(q.device)
+            temp2 = torch.broadcast_to(temp2[None, ...], (total_span, numofpattern))
+            filling_mask = (temp-temp2) >= 0
+
+            # initial complete q, k, v
+            complete_k = torch.zeros([total_span, numofpattern, embed_dim]).to(q.device)
+            complete_v = torch.zeros([total_span, numofpattern, embed_dim]).to(q.device)
+            complete_key_padding_mask = torch.ones([total_span, numofpattern]) > 0
+            complete_key_padding_mask = complete_key_padding_mask.to(q.device)
+
+            # construct complete_q
+            complete_q = q_repr[~lenmask].reshape(bsz, int(total_span/bsz), hd)
+            # bsz(2), total_span/bsz, hd(3), batch_inside_order: lexico order
+            complete_q = complete_q.reshape(total_span, 1, hd).transpose(0, 1)
+            # tgt_len(1), total_span, hd(3), total_span_inside_order: batch first, then lexico order
+
+            # construct complete_k
+            new_k_repr = torch.broadcast_to(k_repr[:, None, ...], (bsz, int(total_span/bsz), seq*seq, hd))
+            new_k_repr = new_k_repr[~pattern_mask_legal]
+            complete_k[filling_mask] = new_k_repr
+            complete_k = complete_k.transpose(0, 1)
+            # numnofpattern, total_span, hd(3), total_span_inside_order: batch first, then lexico order
+
+            # construct complete_v
+            new_v_repr = torch.broadcast_to(v_repr[:, None, ...], (bsz, int(total_span/bsz), seq*seq, hd))
+            new_v_repr = new_v_repr[~pattern_mask_legal]
+            complete_v[filling_mask] = new_v_repr
+            complete_v = complete_v.transpose(0, 1)
+            # numnofpattern, total_span, hd(3), total_span_inside_order: batch first, then lexico order
+
+            # construct complete_key_paddding_mask
+            new_mask_for_padding = mask_for_padding[~lenmask].reshape(bsz, int(total_span/bsz), seq*seq)
+            new_mask_for_padding = new_mask_for_padding[~pattern_mask_legal]
+            complete_key_padding_mask[filling_mask] = new_mask_for_padding
+
+            ori_bsz = bsz
+            tgt_len, bsz, embed_dim = complete_q.shape
+            source_len, _, _ = complete_k.shape
+
+            # prep key padding mask
+            if complete_key_padding_mask is not None and complete_key_padding_mask.dtype == torch.uint8:
+                warnings.warn("Byte tensor for key_padding_mask in myMultiheadAttention is deprecated. Use bool tensor instead.")
+                complete_key_padding_mask = complete_key_padding_mask.to(torch.bool)
+
+            # reshape q, k, v for multihead attention and make em batch first
+            complete_q = complete_q.contiguous().view(tgt_len, bsz * num_heads, head_dim).transpose(0, 1)
+            complete_k = complete_k.contiguous().view(complete_k.shape[0], bsz * num_heads, head_dim).transpose(0, 1)
+            complete_v = complete_v.contiguous().view(complete_v.shape[0], bsz * num_heads, head_dim).transpose(0, 1)
+
+            # skip related content about bias_k, bias_v, add_zero_attention
+            # update source sequence length after adjustments
+            source_len = complete_k.size(1)
+
+            # merge key padding and attention masks
+            if complete_key_padding_mask is not None:
+                assert complete_key_padding_mask.shape == (bsz, source_len), \
+                    f"expecting key_padding_mask shape of {(bsz, source_len)}, but got {complete_key_padding_mask.shape}"
+                complete_key_padding_mask = complete_key_padding_mask.view(bsz, 1, 1, source_len).   \
+                    expand(-1, num_heads, -1, -1).reshape(bsz * num_heads, 1, source_len)
+                attn_mask = complete_key_padding_mask
+
+            # convert mask to float
+            if attn_mask is not None and attn_mask.dtype == torch.bool:
+                new_attn_mask = torch.zeros_like(attn_mask, dtype=q.dtype)
+                new_attn_mask.masked_fill_(attn_mask, float("-inf"))
+                attn_mask = new_attn_mask
+
+            # (deep breath) calculate attention and out projection
+            attn_output, attn_output_weights = _scaled_dot_product_attention(complete_q, complete_k, complete_v, attn_mask, dropout_p)
+            attn_output = attn_output.transpose(0, 1).contiguous().view(tgt_len * bsz, embed_dim)
+            attn_output = F.linear(attn_output, out_proj_weight, out_proj_bias)
+            attn_output = attn_output.view(tgt_len, bsz, attn_output.size(1))
+
+            # do reverse and fill attn_ouput to complete_attn_ouput
+            attn_output = attn_output.transpose(0, 1).reshape(-1, hd)
+            lenmask_attn = lenmask.reshape(ori_bsz, seq, seq)
+            complete_attn_output[~lenmask_attn] = attn_output
+
+            bsz = ori_bsz
+        
+        for i in range(templength, seq, 4):
+            if (i + 4) >= seq:
+                lenlist = []
+                for m in range(i, seq):
+                    lenlist.append(m)
+            else:
+                lenlist = [i, i + 1, i + 2, i + 3]
+            
+            tgt_len, bsz, hd = query.shape
+            source_len, _, _ = key.shape
+            seq = int(math.sqrt(tgt_len))
+            numofpattern = seq - lenlist[0]
+            lenmask = torch.ones(bsz, seq, seq).to(q.device)
+            total_span = 0
+            for item in lenlist:
+                total_span += (seq - item + 1)*bsz
+                lenmask[:, range(seq - item + 1), range(item - 1, seq)] = 0
+            lenmask = (lenmask > 0).reshape(bsz, seq * seq)
+            pattern_mask_legal = pattern_mask[~lenmask].reshape(bsz, int(total_span / bsz), seq * seq)
+
+            temp = torch.broadcast_to(tempfilling[None, ..., None], (bsz, seq*seq, numofpattern))
+            temp = temp[~lenmask].reshape(total_span, numofpattern)
+            temp2 = torch.arange(start=1, end=numofpattern+1, step=1).to(q.device)
+            temp2 = torch.broadcast_to(temp2[None, ...], (total_span, numofpattern))
+            filling_mask = (temp-temp2) >= 0
+
+            # initial complete q, k, v
+            complete_k = torch.zeros([total_span, numofpattern, embed_dim]).to(q.device)
+            complete_v = torch.zeros([total_span, numofpattern, embed_dim]).to(q.device)
+            complete_key_padding_mask = torch.ones([total_span, numofpattern]) > 0
+            complete_key_padding_mask = complete_key_padding_mask.to(q.device)
+
+            # construct complete_q
+            complete_q = q_repr[~lenmask].reshape(bsz, int(total_span/bsz), hd)
+            # bsz(2), total_span/bsz, hd(3), batch_inside_order: lexico order
+            complete_q = complete_q.reshape(total_span, 1, hd).transpose(0, 1)
+            # tgt_len(1), total_span, hd(3), total_span_inside_order: batch first, then lexico order
+
+            # construct complete_k
+            new_k_repr = torch.broadcast_to(k_repr[:, None, ...], (bsz, int(total_span/bsz), seq*seq, hd))
+            new_k_repr = new_k_repr[~pattern_mask_legal]
+            complete_k[filling_mask] = new_k_repr
+            complete_k = complete_k.transpose(0, 1)
+            # numnofpattern, total_span, hd(3), total_span_inside_order: batch first, then lexico order
+
+            # construct complete_v
+            new_v_repr = torch.broadcast_to(v_repr[:, None, ...], (bsz, int(total_span/bsz), seq*seq, hd))
+            new_v_repr = new_v_repr[~pattern_mask_legal]
+            complete_v[filling_mask] = new_v_repr
+            complete_v = complete_v.transpose(0, 1)
+            # numnofpattern, total_span, hd(3), total_span_inside_order: batch first, then lexico order
+
+            # construct complete_key_paddding_mask
+            new_mask_for_padding = mask_for_padding[~lenmask].reshape(bsz, int(total_span/bsz), seq*seq)
+            new_mask_for_padding = new_mask_for_padding[~pattern_mask_legal]
+            complete_key_padding_mask[filling_mask] = new_mask_for_padding
+
+            ori_bsz = bsz
+            tgt_len, bsz, embed_dim = complete_q.shape
+            source_len, _, _ = complete_k.shape
+
+            # prep key padding mask
+            if complete_key_padding_mask is not None and complete_key_padding_mask.dtype == torch.uint8:
+                warnings.warn("Byte tensor for key_padding_mask in myMultiheadAttention is deprecated. Use bool tensor instead.")
+                complete_key_padding_mask = complete_key_padding_mask.to(torch.bool)
+
+            # reshape q, k, v for multihead attention and make em batch first
+            complete_q = complete_q.contiguous().view(tgt_len, bsz * num_heads, head_dim).transpose(0, 1)
+            complete_k = complete_k.contiguous().view(complete_k.shape[0], bsz * num_heads, head_dim).transpose(0, 1)
+            complete_v = complete_v.contiguous().view(complete_v.shape[0], bsz * num_heads, head_dim).transpose(0, 1)
+
+            # skip related content about bias_k, bias_v, add_zero_attention
+            # update source sequence length after adjustments
+            source_len = complete_k.size(1)
+
+            # merge key padding and attention masks
+            if complete_key_padding_mask is not None:
+                assert complete_key_padding_mask.shape == (bsz, source_len), \
+                    f"expecting key_padding_mask shape of {(bsz, source_len)}, but got {complete_key_padding_mask.shape}"
+                complete_key_padding_mask = complete_key_padding_mask.view(bsz, 1, 1, source_len).   \
+                    expand(-1, num_heads, -1, -1).reshape(bsz * num_heads, 1, source_len)
+                attn_mask = complete_key_padding_mask
+
+            # convert mask to float
+            if attn_mask is not None and attn_mask.dtype == torch.bool:
+                new_attn_mask = torch.zeros_like(attn_mask, dtype=q.dtype)
+                new_attn_mask.masked_fill_(attn_mask, float("-inf"))
+                attn_mask = new_attn_mask
+
+            # (deep breath) calculate attention and out projection
+            attn_output, attn_output_weights = _scaled_dot_product_attention(complete_q, complete_k, complete_v, attn_mask, dropout_p)
+            attn_output = attn_output.transpose(0, 1).contiguous().view(tgt_len * bsz, embed_dim)
+            attn_output = F.linear(attn_output, out_proj_weight, out_proj_bias)
+            attn_output = attn_output.view(tgt_len, bsz, attn_output.size(1))
+
+            # do reverse and fill attn_ouput to complete_attn_ouput
+            attn_output = attn_output.transpose(0, 1).reshape(-1, hd)
+            lenmask_attn = lenmask.reshape(ori_bsz, seq, seq)
+            complete_attn_output[~lenmask_attn] = attn_output
+
+            bsz = ori_bsz
+
+        lenlist = [seq]
+        tgt_len, bsz, hd = query.shape
+        source_len, _, _ = key.shape
+        seq = int(math.sqrt(tgt_len))
+        numofpattern = seq*seq
+        lenmask = torch.ones(bsz, seq, seq).to(q.device)
+        total_span = 0
+        for item in lenlist:
+            total_span += (seq - item + 1)*bsz
+            lenmask[:, range(seq - item + 1), range(item - 1, seq)] = 0
+        lenmask = (lenmask > 0).reshape(bsz, seq * seq)
+        # pattern_mask_legal = pattern_mask[~lenmask].reshape(bsz, int(total_span / bsz), seq * seq)
+        pattern_mask_legal = torch.zeros((bsz, int(total_span / bsz), seq*seq)) > 0
+        pattern_mask_legal = pattern_mask_legal.to(pattern_mask.device)
+        
+
+        # temp = torch.broadcast_to(tempfilling[None, ..., None], (bsz, seq*seq, numofpattern))
+        # temp = temp[~lenmask].reshape(total_span, numofpattern)
+        # temp2 = torch.arange(start=1, end=numofpattern+1, step=1).to(q.device)
+        # temp2 = torch.broadcast_to(temp2[None, ...], (total_span, numofpattern))
+        # filling_mask = (temp-temp2) >= 0
+        filling_mask = torch.zeros([total_span, numofpattern]) == 0
+        filling_mask = filling_mask.to(tempfilling.device)
+
+        # initial complete q, k, v
+        complete_k = torch.zeros([total_span, numofpattern, embed_dim]).to(q.device)
+        complete_v = torch.zeros([total_span, numofpattern, embed_dim]).to(q.device)
+        complete_key_padding_mask = torch.ones([total_span, numofpattern]) > 0
+        complete_key_padding_mask = complete_key_padding_mask.to(q.device)
+
+        # construct complete_q
+        complete_q = q_repr[~lenmask].reshape(bsz, int(total_span/bsz), hd)
+        # bsz(2), total_span/bsz, hd(3), batch_inside_order: lexico order
+        complete_q = complete_q.reshape(total_span, 1, hd).transpose(0, 1)
+        # tgt_len(1), total_span, hd(3), total_span_inside_order: batch first, then lexico order
+
+        # construct complete_k
+        new_k_repr = torch.broadcast_to(k_repr[:, None, ...], (bsz, int(total_span/bsz), seq*seq, hd))
+        new_k_repr = new_k_repr[~pattern_mask_legal]
+        complete_k[filling_mask] = new_k_repr
+        complete_k = complete_k.transpose(0, 1)
+        # numnofpattern, total_span, hd(3), total_span_inside_order: batch first, then lexico order
+
+        # construct complete_v
+        new_v_repr = torch.broadcast_to(v_repr[:, None, ...], (bsz, int(total_span/bsz), seq*seq, hd))
+        new_v_repr = new_v_repr[~pattern_mask_legal]
+        complete_v[filling_mask] = new_v_repr
+        complete_v = complete_v.transpose(0, 1)
+        # numnofpattern, total_span, hd(3), total_span_inside_order: batch first, then lexico order
+
+        # construct complete_key_paddding_mask
+        new_mask_for_padding = mask_for_padding[~lenmask].reshape(bsz, int(total_span/bsz), seq*seq)
+        new_mask_for_padding = new_mask_for_padding[~pattern_mask_legal]
+        complete_key_padding_mask[filling_mask] = new_mask_for_padding
+
+        ori_bsz = bsz
+        tgt_len, bsz, embed_dim = complete_q.shape
+        source_len, _, _ = complete_k.shape
+
+        # prep key padding mask
+        if complete_key_padding_mask is not None and complete_key_padding_mask.dtype == torch.uint8:
+            warnings.warn("Byte tensor for key_padding_mask in myMultiheadAttention is deprecated. Use bool tensor instead.")
+            complete_key_padding_mask = complete_key_padding_mask.to(torch.bool)
+
+        # reshape q, k, v for multihead attention and make em batch first
+        complete_q = complete_q.contiguous().view(tgt_len, bsz * num_heads, head_dim).transpose(0, 1)
+        complete_k = complete_k.contiguous().view(complete_k.shape[0], bsz * num_heads, head_dim).transpose(0, 1)
+        complete_v = complete_v.contiguous().view(complete_v.shape[0], bsz * num_heads, head_dim).transpose(0, 1)
+
+        # skip related content about bias_k, bias_v, add_zero_attention
+        # update source sequence length after adjustments
+        source_len = complete_k.size(1)
+
+        # merge key padding and attention masks
+        if complete_key_padding_mask is not None:
+            assert complete_key_padding_mask.shape == (bsz, source_len), \
+                f"expecting key_padding_mask shape of {(bsz, source_len)}, but got {complete_key_padding_mask.shape}"
+            complete_key_padding_mask = complete_key_padding_mask.view(bsz, 1, 1, source_len).   \
+                expand(-1, num_heads, -1, -1).reshape(bsz * num_heads, 1, source_len)
+            attn_mask = complete_key_padding_mask
+
+        # convert mask to float
+        if attn_mask is not None and attn_mask.dtype == torch.bool:
+            new_attn_mask = torch.zeros_like(attn_mask, dtype=q.dtype)
+            new_attn_mask.masked_fill_(attn_mask, float("-inf"))
+            attn_mask = new_attn_mask
+
+        # (deep breath) calculate attention and out projection
+        attn_output, attn_output_weights = _scaled_dot_product_attention(complete_q, complete_k, complete_v, attn_mask, dropout_p)
+        attn_output = attn_output.transpose(0, 1).contiguous().view(tgt_len * bsz, embed_dim)
+        attn_output = F.linear(attn_output, out_proj_weight, out_proj_bias)
+        attn_output = attn_output.view(tgt_len, bsz, attn_output.size(1))
+
+        # do reverse and fill attn_ouput to complete_attn_ouput
+        attn_output = attn_output.transpose(0, 1).reshape(-1, hd)
+        lenmask_attn = lenmask.reshape(ori_bsz, seq, seq)
+        complete_attn_output[~lenmask_attn] = attn_output
+        
+        bsz = ori_bsz
+
+        complete_attn_output = complete_attn_output.reshape(bsz, seq*seq, embed_dim).transpose(0, 1)
+        
+        if need_weights:
+            # optionally average attention weights over heads
+            raise RuntimeError("Have not reverse and fill attention weights.")
+            # attn_output_weights = attn_output_weights.view(bsz, num_heads, tgt_len, source_len)
+            # if average_attn_weights:
+            #     attn_output_weights = attn_output_weights.sum(dim=1) / num_heads
+
+            # if not is_batched:
+            #     # squeeze the output if input was unbatched
+            #     attn_output = attn_output.squeeze(1)
+            #     attn_output_weights = attn_output_weights.squeeze(0)
+            # return attn_output, attn_output_weights
+        else:
+            if not is_batched:
+                # squeeze the output if input was unbatched
+                raise RuntimeError("Will not allow non-batched input.")
+            return complete_attn_output, None
 
     else:
         raise RuntimeError("attention pattern not defined.")

@@ -12,7 +12,7 @@ import h5py
 
 class NestedNERDataset(Dataset):
     def __init__(self, version, mode, tokenizer, truncate_length=128, schema="span", use_context=True,
-                 token_schema="BIES", soft_iou=0.7, bert_embed=""):
+                 token_schema="BIES", bert_embed=""):
         self.version = version
         self.mode = mode
         self.schema = schema
@@ -41,7 +41,7 @@ class NestedNERDataset(Dataset):
         # self.max_word_count = max(160, self.truncate_length)
         self.max_word_count = 200
         self.max_char_count = 70
-        self.max_entity_count = 30
+        # self.max_entity_count = 30
         # self.max_word_count = 150
         # self.max_char_count = 50
         # self.max_entity_count = 20
@@ -62,7 +62,7 @@ class NestedNERDataset(Dataset):
         elif self.token_schema == "BIES-type":
             self.token_label_count = 4 * len(self.type2id)
             
-        self.soft_iou = soft_iou
+        # self.soft_iou = soft_iou
         
         self.bert_embed_path = bert_embed
         if self.bert_embed_path:
@@ -346,60 +346,60 @@ class NestedNERDataset(Dataset):
             return new_label.tolist(), None, None, None
 
         # seq2seq
-        if self.schema in ['DETRSeq', 'DETR']:
-            label = []
-            for ent in entities:
-                label.append([ent['start'], ent['end']-1, self.type2id[ent['type']]])
-            label = sorted(label, key=lambda x: (x[0], x[1], x[2]))
-            if self.schema == 'DETRSeq':
-                label = label + \
-                    [[-100, -100, len(self.type2id)]] + \
-                    [[-100, -100, -100]] * (self.max_entity_count - 1 - len(label))
-            if self.schema == "DETR":
-                label = label + \
-                    [[-100, -100, -100]] * (self.max_entity_count - len(label))
-            return label, None, None, None
+        # if self.schema in ['DETRSeq', 'DETR']:
+        #     label = []
+        #     for ent in entities:
+        #         label.append([ent['start'], ent['end']-1, self.type2id[ent['type']]])
+        #     label = sorted(label, key=lambda x: (x[0], x[1], x[2]))
+        #     if self.schema == 'DETRSeq':
+        #         label = label + \
+        #             [[-100, -100, len(self.type2id)]] + \
+        #             [[-100, -100, -100]] * (self.max_entity_count - 1 - len(label))
+        #     if self.schema == "DETR":
+        #         label = label + \
+        #             [[-100, -100, -100]] * (self.max_entity_count - len(label))
+        #     return label, None, None, None
         
-        if self.schema == "softspan":
-            new_label = np.full(
-                (self.max_word_count, self.max_word_count), -100, dtype='int64')
-            ori_label = np.full(
-                (self.max_word_count, self.max_word_count), -100, dtype='int64')
-            head_label = np.full(
-                (self.max_word_count, self.max_word_count), -100, dtype='int64')
-            tail_label = np.full(
-                (self.max_word_count, self.max_word_count), -100, dtype='int64')
+        # if self.schema == "softspan":
+        #     new_label = np.full(
+        #         (self.max_word_count, self.max_word_count), -100, dtype='int64')
+        #     ori_label = np.full(
+        #         (self.max_word_count, self.max_word_count), -100, dtype='int64')
+        #     head_label = np.full(
+        #         (self.max_word_count, self.max_word_count), -100, dtype='int64')
+        #     tail_label = np.full(
+        #         (self.max_word_count, self.max_word_count), -100, dtype='int64')
             
-            new_label[0:word_count,0:word_count] += \
-                np.triu((100 + len(self.type2id)) * np.ones((word_count, word_count), dtype='int64'))
-            ori_label[0:word_count,0:word_count] += \
-                np.triu((100 + len(self.type2id)) * np.ones((word_count, word_count), dtype='int64'))
-            tail_label[0:word_count,0:word_count] = np.arange(word_count).reshape(1, -1).repeat(word_count, 0)
-            head_label[0:word_count,0:word_count] = tail_label[0:word_count,0:word_count].transpose()
-            iou_score = np.zeros((self.max_word_count, self.max_word_count)) # record max iou score between this span with any entity
+        #     new_label[0:word_count,0:word_count] += \
+        #         np.triu((100 + len(self.type2id)) * np.ones((word_count, word_count), dtype='int64'))
+        #     ori_label[0:word_count,0:word_count] += \
+        #         np.triu((100 + len(self.type2id)) * np.ones((word_count, word_count), dtype='int64'))
+        #     tail_label[0:word_count,0:word_count] = np.arange(word_count).reshape(1, -1).repeat(word_count, 0)
+        #     head_label[0:word_count,0:word_count] = tail_label[0:word_count,0:word_count].transpose()
+        #     iou_score = np.zeros((self.max_word_count, self.max_word_count)) # record max iou score between this span with any entity
             
-            for ent in entities:
-                st = ent['start']
-                ed = ent['end'] - 1
-                tp = self.type2id[ent['type']]
-                new_label[st, ed] = tp
-                ori_label[st, ed] = tp
+        #     for ent in entities:
+        #         st = ent['start']
+        #         ed = ent['end'] - 1
+        #         tp = self.type2id[ent['type']]
+        #         new_label[st, ed] = tp
+        #         ori_label[st, ed] = tp
                 
-                for i in range(0, ed + 1):
-                    for j in range(i, word_count):
-                        iou_now = iou((i, j), (st, ed))
-                        if iou_now > max(self.soft_iou, iou_score[i,j]):
-                            iou_score[i, j] = iou_now
-                            new_label[i, j] = tp
-                            head_label[i, j] = st
-                            tail_label[i, j] = ed
+        #         for i in range(0, ed + 1):
+        #             for j in range(i, word_count):
+        #                 iou_now = iou((i, j), (st, ed))
+        #                 if iou_now > max(self.soft_iou, iou_score[i,j]):
+        #                     iou_score[i, j] = iou_now
+        #                     new_label[i, j] = tp
+        #                     head_label[i, j] = st
+        #                     tail_label[i, j] = ed
             
-            head_label[new_label == len(self.type2id)] = -100
-            head_label[new_label == -100] = -100
-            tail_label[new_label == len(self.type2id)] = -100
-            tail_label[new_label == -100] = -100
+        #     head_label[new_label == len(self.type2id)] = -100
+        #     head_label[new_label == -100] = -100
+        #     tail_label[new_label == len(self.type2id)] = -100
+        #     tail_label[new_label == -100] = -100
             
-            return new_label.tolist(), head_label.tolist(), tail_label.tolist(), ori_label.tolist()
+        #     return new_label.tolist(), head_label.tolist(), tail_label.tolist(), ori_label.tolist()
         
     def convert_token(self, word_count, entities):
         #label = np.full((self.max_word_count, self.token_label_count), -100, dtype='int64')
@@ -554,13 +554,12 @@ class NestedNERDataset(Dataset):
                 
         input_word, word_count = self.word_tokenize(tokens)
         input_char = self.char_tokenize(tokens)
+        input_pos = self.pos_tokenize(pos)
         
         l_input_word, _ = self.word_tokenize(ltokens, True)
         r_input_word, _ = self.word_tokenize(rtokens)
         l_input_char = self.char_tokenize(ltokens, True)
         r_input_char = self.char_tokenize(rtokens)
-        
-        input_pos = self.pos_tokenize(pos)
         l_input_pos = self.pos_tokenize(line.get('lpos', []), True)
         r_input_pos = self.pos_tokenize(line.get('rpos', []))
 

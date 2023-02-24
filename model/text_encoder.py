@@ -7,12 +7,13 @@ import torch.nn.functional as F
 import numpy as np
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from model.position_embed import SinusoidalPositionalEmbedding
-load_kebiolm = True
-try:
-    from model.kebiolm.modeling_kebio import KebioModel
-    from model.kebiolm.configuration_kebio import KebioConfig
-except BaseException:
-    load_kebiolm = False
+# load_kebiolm = True
+# try:
+#     from model.kebiolm.modeling_kebio import KebioModel
+#     from model.kebiolm.configuration_kebio import KebioConfig
+# except BaseException:
+#     load_kebiolm = False
+load_kebiolm = False
 
   
 def reinit(model, layer_count):
@@ -48,12 +49,12 @@ class TextEncoder(nn.Module):
             if bert_model_path.lower().find('kebio') == -1:
                 self.bert_list.append(AutoModel.from_pretrained(bert_model_path))
                 self.bert_config_list.append(AutoConfig.from_pretrained(bert_model_path))
-            else:
-                assert load_kebiolm
-                config = KebioConfig.from_pretrained(bert_model_path)
-                model = KebioModel.from_pretrained(bert_model_path, config=config)
-                self.bert_list.append(model)
-                self.bert_config_list.append(config)
+            # else:
+            #     assert load_kebiolm
+            #     config = KebioConfig.from_pretrained(bert_model_path)
+            #     model = KebioModel.from_pretrained(bert_model_path, config=config)
+            #     self.bert_list.append(model)
+            #     self.bert_config_list.append(config)
         self.bert_additional_config = bert_config
         if self.bert_additional_config.get('reinit', 0) > 0:
             for model in self.bert_list:
@@ -182,20 +183,28 @@ class TextEncoder(nn.Module):
             self.bert_config_list = [self.bert_config]
 
         for idx, bert in enumerate(self.bert_list):
-            if load_kebiolm and isinstance(bert, KebioModel):
-                if self.bert_additional_config['bert_output'] == 'last':
-                    memory = bert(input_ids[:,idx], attention_mask[:,idx], token_type_ids=token_type_ids[:,idx])[2]  # Batch * Length * Hidden
-                else:
-                    raise NotImplementedError
-            else:
-                if self.bert_additional_config['bert_output'] == 'last':
-                    memory = bert(input_ids[:,idx], attention_mask[:,idx], token_type_ids=token_type_ids[:,idx])[0]  # Batch * Length * Hidden
-                else: 
-                    opt = bert(input_ids[:,idx], attention_mask[:,idx], token_type_ids=token_type_ids[:,idx], return_dict=True, output_hidden_states=True)['hidden_states']
-                    if self.bert_additional_config['bert_output'] == 'mean-last-4':
-                        memory = torch.stack(opt[-4:],dim=-1).mean(-1)
-                    elif self.bert_additional_config['bert_output'] == 'concat-last-4':
-                        memory = torch.cat(opt[-4:],dim=-1)
+            if self.bert_additional_config['bert_output'] == 'last':
+                memory = bert(input_ids[:,idx], attention_mask[:,idx], token_type_ids=token_type_ids[:,idx])[0]  # Batch * Length * Hidden
+            else: 
+                opt = bert(input_ids[:,idx], attention_mask[:,idx], token_type_ids=token_type_ids[:,idx], return_dict=True, output_hidden_states=True)['hidden_states']
+                if self.bert_additional_config['bert_output'] == 'mean-last-4':
+                    memory = torch.stack(opt[-4:],dim=-1).mean(-1)
+                elif self.bert_additional_config['bert_output'] == 'concat-last-4':
+                    memory = torch.cat(opt[-4:],dim=-1)
+            # if load_kebiolm and isinstance(bert, KebioModel):
+            #     if self.bert_additional_config['bert_output'] == 'last':
+            #         memory = bert(input_ids[:,idx], attention_mask[:,idx], token_type_ids=token_type_ids[:,idx])[2]  # Batch * Length * Hidden
+            #     else:
+            #         raise NotImplementedError
+            # else:
+            #     if self.bert_additional_config['bert_output'] == 'last':
+            #         memory = bert(input_ids[:,idx], attention_mask[:,idx], token_type_ids=token_type_ids[:,idx])[0]  # Batch * Length * Hidden
+            #     else: 
+            #         opt = bert(input_ids[:,idx], attention_mask[:,idx], token_type_ids=token_type_ids[:,idx], return_dict=True, output_hidden_states=True)['hidden_states']
+            #         if self.bert_additional_config['bert_output'] == 'mean-last-4':
+            #             memory = torch.stack(opt[-4:],dim=-1).mean(-1)
+            #         elif self.bert_additional_config['bert_output'] == 'concat-last-4':
+            #             memory = torch.cat(opt[-4:],dim=-1)
         
             if not self.context_lstm:
                 if self.bert_additional_config['subword_aggr'] == 'first':

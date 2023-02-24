@@ -7,44 +7,31 @@ def generate_parser():
     parser.add_argument("--version", type=str, default="genia",
                         choices=["ace05", "ace04", "genia91", "kbp"],
                         help="Dataset version.")
-    parser.add_argument("--model", type=str, default="SpanModel",
-                        choices=["SpanModel", "SpanAttModelV3", "VanillaSpanMax", "VanillaSpanMean", "SpanAttfullyconnect", "SpanAttInToken", "SpanAttsamehandt", "SpanAttsubspan", "SpanAttsibling"])
+    parser.add_argument("--model", type=str, default="VanilllaSpanBase",
+                        choices=["VanillaSpanBase", "SpanAttfullyconnect", "SpanAttschema"])
     parser.add_argument("--schema", type=str, default="span",
                         choices=["span"])
-    parser.add_argument("--soft_iou", type=float, default=0.7)
-    
-    parser.add_argument("--token_schema", type=str, default="BE",
-                        choices=['BE', 'BIE', 'BIES', 'BE-type', 'BIE-type', 'BIES-type'])
-    parser.add_argument("--token_aux", action="store_true")
-    parser.add_argument("--token_aux_weight", type=float, default=1.0)
-    
-    parser.add_argument("--trans_aux", action="store_true")
-    parser.add_argument("--trans_aux_weight", type=float, default=1.0)
-
+    parser.add_argument("--score", type=str, default="spanattention",
+                        choices=['spanattention'])
+    # parser.add_argument("--soft_iou", type=float, default=0.7)
     parser.add_argument("--seed", type=int, default=-1)
-    
-    parser.add_argument("--score", type=str, default="biaffine",
-                        choices=['biaffine', 'tri_attention', 'tri_affine',
-                                 'tri_affine_wo_label', 'tri_affine_wo_boundary',
-                                 'tri_affine_wo_scorer', 'tri_affine_wo_scorer_w_boundary',
-                                 'lineartri', 'linattntri'])
-    
-    parser.add_argument("--rel_pos_attn", action="store_true")
-    parser.add_argument("--rel_pos", action="store_true")
-    parser.add_argument("--rel_k", type=int, default=64)
-    
-    parser.add_argument("--att_dim", type=int, default=0)
-    parser.add_argument("--no_tri_mask", action="store_true")
-    parser.add_argument("--reduce_last", action="store_true")
-    
-    parser.add_argument("--type_attention", action="store_true")    
-    parser.add_argument("--aux_loss", action="store_true")  
-    
-    parser.add_argument("--bert_name_or_path", type=str, default="")
     parser.add_argument("--device", type=str, default="cuda:0")
     
-    parser.add_argument("--freeze_bert", action="store_true")
-    parser.add_argument("--no_lr_decay", action="store_true")
+
+    # parser.add_argument("--trans_aux", action="store_true")
+    # parser.add_argument("--trans_aux_weight", type=float, default=1.0)
+    # parser.add_argument("--score", type=str, default="biaffine",
+    #                     choices=['biaffine', 'tri_attention', 'tri_affine',
+    #                              'tri_affine_wo_label', 'tri_affine_wo_boundary',
+    #                              'tri_affine_wo_scorer', 'tri_affine_wo_scorer_w_boundary',
+    #                              'lineartri', 'linattntri'])
+    # parser.add_argument("--rel_pos_attn", action="store_true")
+    # parser.add_argument("--rel_pos", action="store_true")
+    # parser.add_argument("--rel_k", type=int, default=64)
+    # parser.add_argument("--no_tri_mask", action="store_true")
+    # parser.add_argument("--reduce_last", action="store_true")
+    # parser.add_argument("--type_attention", action="store_true")    
+    
 
     # Train setting
     parser.add_argument("--save_every_epoch", action="store_true")
@@ -53,6 +40,7 @@ def generate_parser():
     parser.add_argument("--decoder_learning_rate", type=float, default=0.0)
     parser.add_argument("--task_learning_rate", type=float, default=0.0)
     parser.add_argument("--not_correct_bias", action="store_true")
+    parser.add_argument("--no_lr_decay", action="store_true")
     
     parser.add_argument("--weight_decay", type=float, default=1e-2)
     parser.add_argument("--train_epoch", type=int, default=100)
@@ -65,23 +53,28 @@ def generate_parser():
     parser.add_argument("--warmup_ratio", type=float, default=0.1)
     parser.add_argument("--ema", type=float, default=0.)
     
-    # DETR
-    parser.add_argument("--query_head_count", type=int, default=30)
-    parser.add_argument("--decoder_layer_count", type=int, default=4)
+
+    # aux loss
+    # parser.add_argument("--query_head_count", type=int, default=30)
+    # parser.add_argument("--decoder_layer_count", type=int, default=4)
+    parser.add_argument("--aux_loss", action="store_true")
+    parser.add_argument("--token_aux", action="store_true")
+    parser.add_argument("--token_aux_weight", type=float, default=1.0)
     parser.add_argument("--class_loss_weight", type=float, default=1.0)
     parser.add_argument("--filter_loss_weight", type=float, default=1.0)
     parser.add_argument("--weight_scheduler", type=str, default="none",
                         choices=['none', 'square'])
     
-    parser.add_argument("--na_weight", type=float, default=1.0)
-    parser.add_argument("--pointer", type=str, default='pointer',
-                        choices=['aligner', 'pointer', 'biaffine'])  
-    parser.add_argument("--query", type=str, default='input',
-                        choices=['input', 'attention'])
-    parser.add_argument("--pre_norm", action="store_true")
-    parser.add_argument("--no_linear_class", action="store_true")
+    
+    # parser.add_argument("--pointer", type=str, default='pointer',
+    #                     choices=['aligner', 'pointer', 'biaffine'])  
+    # parser.add_argument("--query", type=str, default='input',
+    #                     choices=['input', 'attention'])
+    # parser.add_argument("--pre_norm", action="store_true")
+    # parser.add_argument("--no_linear_class", action="store_true")
 
-    # v2 only
+
+    # losses related
     parser.add_argument("--loss", type=str, default="ce",
                         choices=["ce", "focal", "ldam", "dice", "two"])
     parser.add_argument("--kl", type=str, default="none",
@@ -93,33 +86,43 @@ def generate_parser():
     parser.add_argument("--ldam_s", type=float, default=30)
     parser.add_argument("--dice_alpha", type=float, default=0.01)
     parser.add_argument("--dice_gamma", type=float, default=1.0)
-    
-    parser.add_argument("--use_context", action="store_true")
-    parser.add_argument("--context_lstm", action="store_true")
-    
     parser.add_argument("--negative_sampling", action="store_true")  # used for span base
     parser.add_argument("--hard_neg_dist", type=int, default=3)
     parser.add_argument("--label_smoothing", type=float, default=0.0)
+    parser.add_argument("--na_weight", type=float, default=1.0)
     
+
+    # general hyperparameters
     parser.add_argument("--dp", type=float, default=0.2)
     parser.add_argument("--act", type=str, default="relu",
                         choices=["relu", "gelu"])
+    parser.add_argument("--token_schema", type=str, default="BE",
+                        choices=['BE', 'BIE', 'BIES', 'BE-type', 'BIE-type', 'BIES-type'])
     
+
     # span_att
-    parser.add_argument("--span_layer_count", type=int, default=2)
-    parser.add_argument("--max_span_count", type=int, default=30)
+    # parser.add_argument("--span_layer_count", type=int, default=2)
+    # parser.add_argument("--max_span_count", type=int, default=30)
+    parser.add_argument("--att_dim", type=int, default=0)
     parser.add_argument("--nhead", type=int, default=2)
     parser.add_argument("--nlayer", type=int, default=2)
-    parser.add_argument("--span_pooling", type=str, default="max", choices=["max", "mean"])
-    parser.add_argument("--share_parser", action="store_true")
-    parser.add_argument("--unscale", action="store_true")  # for transformer not tri-affine attention
-    parser.add_argument("--scale", type=str, default="none",
-                        choices=["none", "sqrt", "triv1", "triv2"])  # for tri-affine attention
-    parser.add_argument("--init_std", type=float, default=2e-4)
-    parser.add_argument("--layer_norm", action="store_true")
+    parser.add_argument("--span_pooling", type=str, default="max", choices=["max", "mean", "end", "diff", "attn"])
+    parser.add_argument("--attn_schema", type=str, default="none", choices=["none", "insidetoken", "samehandt", "subspan", "sibling"])
+    parser.add_argument("--span_pos_embed", action="store_true")
+    # parser.add_argument("--share_parser", action="store_true")
+    # parser.add_argument("--unscale", action="store_true")  # for transformer not tri-affine attention
+    # parser.add_argument("--scale", type=str, default="none",
+    #                     choices=["none", "sqrt", "triv1", "triv2"])  # for tri-affine attention
+    # parser.add_argument("--init_std", type=float, default=2e-4)
+    # parser.add_argument("--layer_norm", action="store_true")
+
 
     # embedding enhancing
+    parser.add_argument("--bert_name_or_path", type=str, default="")
     parser.add_argument("--bert_before_lstm", action="store_true")
+    parser.add_argument("--freeze_bert", action="store_true")
+    parser.add_argument("--use_context", action="store_true")
+    parser.add_argument("--context_lstm", action="store_true")
     parser.add_argument("--subword_aggr", type=str, default="first",
                         choices=['first', 'mean', 'max'])
     parser.add_argument("--bert_output", type=str, default="last",
@@ -146,7 +149,9 @@ def generate_parser():
     parser.add_argument("--lstm_layer", type=int, default=1)
     parser.add_argument("--lstm_dp", type=float, default=0.2)
     
-    parser.add_argument("--tag", type=str, default="")
+
+    # parser.add_argument("--tag", type=str, default="")
+    parser.add_argument("--comment", type=str)
     
     return parser
 
@@ -180,11 +185,11 @@ def generate_loss_config(args):
     loss_dict['class_loss_weight'] = args.class_loss_weight
     loss_dict['filter_loss_weight'] = args.filter_loss_weight
     loss_dict['dp'] = args.dp
-    loss_dict['trans_aux'] = args.trans_aux
-    if args.trans_aux:
-        loss_dict['trans_aux_weight'] = args.trans_aux_weight
-    else:
-        loss_dict['trans_aux_weight'] = 0
+    # loss_dict['trans_aux'] = args.trans_aux
+    # if args.trans_aux:
+    #     loss_dict['trans_aux_weight'] = args.trans_aux_weight
+    # else:
+    #     loss_dict['trans_aux_weight'] = 0
         
     if args.kl != "none":
         loss_dict['kl'] = args.kl
@@ -279,14 +284,16 @@ def generate_config(args):
     if args.agg_layer == "transformer":
         lstm_config['dropout'] = 0.1  # use transformer default
         
-    other_config = {'prenorm': args.pre_norm,
-                    'span_layer_count': args.span_layer_count,
-                    'max_span_count': args.max_span_count,
+    other_config = {# 'prenorm': args.pre_norm,
+                    # 'span_layer_count': args.span_layer_count,
+                    # 'max_span_count': args.max_span_count,
                     'nlayer': args.nlayer,
                     'nhead': args.nhead,
                     'span_pooling': args.span_pooling,
-                    'share_parser': args.share_parser,
-                    'unscale': args.unscale,
+                    'attn_schema': args.attn_schema,
+                    'span_pos_embed': args.span_pos_embed, 
+                    # 'share_parser': args.share_parser,
+                    # 'unscale': args.unscale,
                     'act': args.act}
     
     return bert_config, \

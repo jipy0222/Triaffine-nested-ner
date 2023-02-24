@@ -15,8 +15,8 @@ import numpy as np
 from evaluation import decode, metric, write_predict
 from train_parser import generate_parser, generate_config, generate_loss_config
 from train_utils import generate_output_folder_name, generate_optimizer_scheduler
-from model.span import SpanModel
-from model.span_att_v2 import SpanAttModelV2, SpanAttModelV3, VanillaSpanMax, VanillaSpanMean, SpanAttfullyconnect, SpanAttInToken, SpanAttsamehandt, SpanAttsubspan, SpanAttsibling 
+# from model.span import SpanModel
+from model.span_att_v2 import VanillaSpanBase, SpanAttfullyconnect, SpanAttschema
 from input_util import prepare_input
 from train_utils import main_name, weight_scheduler
 import random
@@ -55,14 +55,14 @@ def run(args):
     except BaseException:
         pass
     
-    if args.model in ["SpanModel"]:
-        args.schema = "span"
-    if args.model in ["DETR"]:
-        args.schema = "DETR"
-    if args.model in ["DETRSeq"]:
-        args.schema = "DETRSeq"
-    if args.model in ["OneStageSpan", "TwoStageSpan"]:
-        args.schema = "softspan"
+    # if args.model in ["SpanModel"]:
+    #     args.schema = "span"
+    # if args.model in ["DETR"]:
+    #     args.schema = "DETR"
+    # if args.model in ["DETRSeq"]:
+    #     args.schema = "DETRSeq"
+    # if args.model in ["OneStageSpan", "TwoStageSpan"]:
+    #     args.schema = "softspan"
         
     if args.freeze_bert:
         if args.use_context:
@@ -77,11 +77,11 @@ def run(args):
         dev_bert_embed = None
         test_bert_embed = None
     
-    train_dataset = NestedNERDataset(args.version, 'train', args.bert_name_or_path, args.truncate_length, args.schema, args.use_context, args.token_schema, args.soft_iou, bert_embed=train_bert_embed)
-    dev_dataset = NestedNERDataset(args.version, 'dev', args.bert_name_or_path, args.truncate_length, args.schema, args.use_context, args.token_schema, args.soft_iou, bert_embed=dev_bert_embed)
-    test_dataset = NestedNERDataset(args.version, 'test', args.bert_name_or_path, args.truncate_length, args.schema, args.use_context, args.token_schema, args.soft_iou, bert_embed=test_bert_embed)
+    train_dataset = NestedNERDataset(args.version, 'train', args.bert_name_or_path, args.truncate_length, args.schema, args.use_context, args.token_schema, bert_embed=train_bert_embed)
+    dev_dataset = NestedNERDataset(args.version, 'dev', args.bert_name_or_path, args.truncate_length, args.schema, args.use_context, args.token_schema, bert_embed=dev_bert_embed)
+    test_dataset = NestedNERDataset(args.version, 'test', args.bert_name_or_path, args.truncate_length, args.schema, args.use_context, args.token_schema, bert_embed=test_bert_embed)
     
-    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, collate_fn=my_collate_fn, shuffle=True, num_workers=1)
+    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, collate_fn=my_collate_fn, shuffle=False, num_workers=1)
     dev_dataloader = DataLoader(dev_dataset, batch_size=args.batch_size, collate_fn=my_collate_fn, shuffle=False, num_workers=1)
     test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, collate_fn=my_collate_fn, shuffle=False, num_workers=1)
 
@@ -89,57 +89,41 @@ def run(args):
     loss_config_dict = generate_loss_config(args)
     
     score_setting = {args.score:True}
-    if args.no_linear_class:
-        score_setting['no_linear_class'] = True
-    if args.type_attention:
-        score_setting['type_attention'] = True
+    # if args.no_linear_class:
+    #     score_setting['no_linear_class'] = True
+    # if args.type_attention:
+    #     score_setting['type_attention'] = True
     score_setting['dp'] = args.dp
     score_setting['att_dim'] = args.att_dim
-    score_setting['no_tri_mask'] = args.no_tri_mask
-    score_setting['reduce_last'] = args.reduce_last
-    score_setting['scale'] = args.scale
-    score_setting['init_std'] = args.init_std
-    score_setting['layer_norm'] = args.layer_norm
-    score_setting['rel_pos_attn'] = args.rel_pos_attn
-    score_setting['rel_pos'] = args.rel_pos
-    score_setting['rel_k'] = args.rel_k
+    # score_setting['no_tri_mask'] = args.no_tri_mask
+    # score_setting['reduce_last'] = args.reduce_last
+    # score_setting['scale'] = args.scale
+    # score_setting['init_std'] = args.init_std
+    # score_setting['layer_norm'] = args.layer_norm
+    # score_setting['rel_pos_attn'] = args.rel_pos_attn
+    # score_setting['rel_pos'] = args.rel_pos
+    # score_setting['rel_k'] = args.rel_k
         
     # ABOVE IS NO NEED TO MODIFY
-    if args.model == "SpanModel":
-        model = SpanModel(args.bert_name_or_path, encoder_config_dict,
-                          len(train_dataset.type2id), score_setting,
-                          loss_config=loss_config_dict).to(args.device)
-    if args.model == "SpanAttModelV3":
-        model = SpanAttModelV3(args.bert_name_or_path, encoder_config_dict,
-                               len(train_dataset.type2id), score_setting,
-                               loss_config=loss_config_dict).to(args.device)
+    # if args.model == "SpanModel":
+    #     model = SpanModel(args.bert_name_or_path, encoder_config_dict,
+    #                       len(train_dataset.type2id), score_setting,
+    #                       loss_config=loss_config_dict).to(args.device)
+    # if args.model == "SpanAttModelV3":
+    #     model = SpanAttModelV3(args.bert_name_or_path, encoder_config_dict,
+    #                            len(train_dataset.type2id), score_setting,
+    #                            loss_config=loss_config_dict).to(args.device)
     # Here to add self-defined model
-    if args.model == "VanillaSpanMax":
-        model = VanillaSpanMax(args.bert_name_or_path, encoder_config_dict,
+    if args.model == "VanillaSpanBase":
+        model = VanillaSpanBase(args.bert_name_or_path, encoder_config_dict,
                                len(train_dataset.type2id), score_setting,
                                loss_config=loss_config_dict).to(args.device)
-    if args.model == "VanillaSpanMean":
-        model = VanillaSpanMean(args.bert_name_or_path, encoder_config_dict,
-                                len(train_dataset.type2id), score_setting,
-                                loss_config=loss_config_dict).to(args.device)
     if args.model == "SpanAttfullyconnect":
         model = SpanAttfullyconnect(args.bert_name_or_path, encoder_config_dict,
                                     len(train_dataset.type2id), score_setting,
                                     loss_config=loss_config_dict).to(args.device)
-    if args.model == "SpanAttInToken":
-        model = SpanAttInToken(args.bert_name_or_path, encoder_config_dict,
-                                    len(train_dataset.type2id), score_setting,
-                                    loss_config=loss_config_dict).to(args.device)
-    if args.model == "SpanAttsamehandt":
-        model = SpanAttsamehandt(args.bert_name_or_path, encoder_config_dict,
-                                    len(train_dataset.type2id), score_setting,
-                                    loss_config=loss_config_dict).to(args.device)
-    if args.model == "SpanAttsubspan":
-        model = SpanAttsubspan(args.bert_name_or_path, encoder_config_dict,
-                                    len(train_dataset.type2id), score_setting,
-                                    loss_config=loss_config_dict).to(args.device)
-    if args.model == "SpanAttsibling":
-        model = SpanAttsibling(args.bert_name_or_path, encoder_config_dict,
+    if args.model == "SpanAttschema":
+        model = SpanAttschema(args.bert_name_or_path, encoder_config_dict,
                                     len(train_dataset.type2id), score_setting,
                                     loss_config=loss_config_dict).to(args.device)
     # check how model work in generate_optimizer_scheduler
