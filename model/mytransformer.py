@@ -223,7 +223,7 @@ def _scaled_dot_product_attention(
     return output, attn
 
 
-def insidetoken_extractor(q: Tensor, k: Tensor, v: Tensor, key_padding_mask: Tensor):
+def insideword_extractor(q: Tensor, k: Tensor, v: Tensor, key_padding_mask: Tensor):
     # q: [len_of_tgt, batch_sz, Eq], k: [len_of_src, batch_sz, Eq], v: [len_of_src, batch_sz, Eq]
     # key_padding_mask: [batch_sz, len_of_src]
     # return will be reshaped q, k, v, src_len
@@ -269,7 +269,7 @@ def insidetoken_extractor(q: Tensor, k: Tensor, v: Tensor, key_padding_mask: Ten
     return q, k, v, new_key_padding_mask
 
 
-def insidetoken_selector(q_repr: Tensor, k_repr: Tensor, v_repr: Tensor, pattern_mask: Tensor, mask_for_padding: Tensor, l: int):
+def insideword_selector(q_repr: Tensor, k_repr: Tensor, v_repr: Tensor, pattern_mask: Tensor, mask_for_padding: Tensor, l: int):
     # generate q, k, v for spans with length l
     bsz, seq, _, hd = q_repr.shape
     q = q_repr[:, range(seq-l+1), range(l-1, seq), :]
@@ -426,7 +426,7 @@ def mymulti_head_attention_forward(
     out_proj_bias: Optional[Tensor],
     training: bool = True,
     need_weights: bool = True,
-    attn_pattern: str = "insidetoken",
+    attn_pattern: str = "insideword",
     use_separate_proj_weight: bool = False,
     q_proj_weight: Optional[Tensor] = None,
     k_proj_weight: Optional[Tensor] = None,
@@ -450,7 +450,7 @@ def mymulti_head_attention_forward(
         training: apply dropout if is ``True``.
         src_len: the actual length of source in each bactch,  which is further used to compute key_padding_mask (illegal span).
         need_weights: output attn_output_weights.
-        attn_pattern: a string to identify attention pattern (optional, default: "insidetoken"--attend to inside token).
+        attn_pattern: a string to identify attention pattern (optional, default: "insideword"--attend to inside token).
         use_separate_proj_weight: the function accept the proj. weights for query, key,
             and value in different forms. If false, in_proj_weight will be used, which is
             a combination of q_proj_weight, k_proj_weight, v_proj_weight.
@@ -599,7 +599,7 @@ def mymulti_head_attention_forward(
     # q: [len_of_tgt, batch_sz, Eq], k: [len_of_src, batch_sz, Eq], v: [len_of_src, batch_sz, Eq]
     # do our personal attention pattern reshape for q, k, v
     #
-    if attn_pattern == "insidetoken":
+    if attn_pattern == "insideword":
         
         tgt_len, bsz, hd = query.shape
         source_len, _, _ = key.shape
@@ -626,7 +626,7 @@ def mymulti_head_attention_forward(
         v_repr = v.transpose(0, 1).reshape(bsz, seq, seq, hd)
 
         for i in range(1, seq+1):
-            q, k, v, key_padding_mask = insidetoken_selector(q_repr, k_repr, v_repr, pattern_mask, mask_for_padding, i)
+            q, k, v, key_padding_mask = insideword_selector(q_repr, k_repr, v_repr, pattern_mask, mask_for_padding, i)
             ori_bsz = bsz
             tgt_len, bsz, embed_dim = q.shape
             source_len, _, _ = k.shape
@@ -1072,7 +1072,7 @@ def mymulti_head_attention_forward_padding(
     out_proj_bias: Optional[Tensor],
     training: bool = True,
     need_weights: bool = True,
-    attn_pattern: str = "insidetoken",
+    attn_pattern: str = "insideword",
     use_separate_proj_weight: bool = False,
     q_proj_weight: Optional[Tensor] = None,
     k_proj_weight: Optional[Tensor] = None,
@@ -1249,7 +1249,7 @@ def mymulti_head_attention_forward_padding(
             b_q, b_k, b_v = in_proj_bias.chunk(3)
         q, k, v = _in_projection(query, key, value, q_proj_weight, k_proj_weight, v_proj_weight, b_q, b_k, b_v)
 
-    if attn_pattern == "insidetoken":
+    if attn_pattern == "insideword":
         pass
 
     elif attn_pattern == "samehandt":
@@ -1412,7 +1412,7 @@ def mymulti_head_attention_forward_grouppadding(
     out_proj_bias: Optional[Tensor],
     training: bool = True,
     need_weights: bool = True,
-    attn_pattern: str = "insidetoken",
+    attn_pattern: str = "insideword",
     use_separate_proj_weight: bool = False,
     q_proj_weight: Optional[Tensor] = None,
     k_proj_weight: Optional[Tensor] = None,
@@ -1553,7 +1553,7 @@ def mymulti_head_attention_forward_grouppadding(
     seq_x = torch.broadcast_to(seq_t[None, None, ...], (bsz, seq, seq))
     seq_y = torch.broadcast_to(seq_t[None, ..., None], (bsz, seq, seq))
     
-    if attn_pattern in ["insidetoken", "samehandt", "subspan"]:
+    if attn_pattern in ["insideword", "samehandt", "subspan"]:
         embs = torch.broadcast_to(src_len[:, None, None], (bsz, seq, seq))
         mask2 = seq_x >= embs
         mask2_for_padding = mask2.reshape(bsz, seq*seq)
@@ -1600,7 +1600,7 @@ def mymulti_head_attention_forward_grouppadding(
         q, k, v = _in_projection(query, key, value, q_proj_weight, k_proj_weight, v_proj_weight, b_q, b_k, b_v)
         # q, k, v: (seq*seq, bsz, embed_dim) batch_inside_order: lexico order. 
 
-    if attn_pattern == "insidetoken":
+    if attn_pattern == "insideword":
         
         t = torch.arange(seq).repeat(seq).to(q.device)
         t1 = torch.broadcast_to(t[None, ...], (seq * seq, seq * seq))
@@ -2770,7 +2770,7 @@ class myMultiheadAttention(Module):
         super(myMultiheadAttention, self).__setstate__(state)
 
     def forward(self, query: Tensor, key: Tensor, value: Tensor, src_len: Tensor,
-                attn_pattern: str = "insidetoken", need_weights: bool = True, 
+                attn_pattern: str = "insideword", need_weights: bool = True, 
                 average_attn_weights: bool = True) -> Tuple[Tensor, Optional[Tensor]]:
         r"""
     Args:
@@ -2788,7 +2788,7 @@ class myMultiheadAttention(Module):
             sequence length, :math:`N` is the batch size, and :math:`E_v` is the value embedding dimension ``vdim``.
             See "Attention Is All You Need" for more details.
         src_len: the actual length of source in each batch, another type of key_padding_mask (required).
-        attn_pattern: the attention pattern (optional, default: "insidetoken"--attend to inside token).
+        attn_pattern: the attention pattern (optional, default: "insideword"--attend to inside token).
         need_weights: If specified, returns ``attn_output_weights`` in addition to ``attn_outputs``.
             Default: ``True``.
         average_attn_weights: If true, indicates that the returned ``attn_weights`` should be averaged across
@@ -2908,13 +2908,13 @@ class myTransformerEncoderLayer(Module):
             self.activation = F.relu
 
     def forward(self, src: Tensor, src_len: Tensor,
-                attn_pattern: str = "insidetoken") -> Tensor:
+                attn_pattern: str = "insideword") -> Tensor:
         r"""Pass the input through the encoder layer.
 
         Args:
             src: the sequence to the encoder (required).
             src_len: the actual length of source in each batch, another type of key_padding_mask (required).
-            attn_pattern: the attention pattern (optional, default: "insidetoken"--attend to inside token).
+            attn_pattern: the attention pattern (optional, default: "insideword"--attend to inside token).
         
         """
         x = src
@@ -2929,7 +2929,7 @@ class myTransformerEncoderLayer(Module):
 
     # self-attention block
     def _sa_block(self, x: Tensor,
-                  src_len: Tensor, attn_pattern: str = "insidetoken") -> Tensor:
+                  src_len: Tensor, attn_pattern: str = "insideword") -> Tensor:
         x = self.self_attn(x, x, x,
                            src_len=src_len,
                            attn_pattern=attn_pattern,
@@ -2965,13 +2965,13 @@ class myTransformerEncoder(Module):
         self.num_layers = num_layers
         self.norm = norm
 
-    def forward(self, src: Tensor, src_len: Tensor, attn_pattern: str = "insidetoken") -> Tensor:
+    def forward(self, src: Tensor, src_len: Tensor, attn_pattern: str = "insideword") -> Tensor:
         r"""Pass the input through the encoder layers in turn.
 
         Args:
             src: the sequence to the encoder (required).
             src_len: the actual length of source in each batch, another type of key_padding_mask (required)
-            attn_pattern: the attention pattern (optional, default: "insidetoken"--attend to inside token).
+            attn_pattern: the attention pattern (optional, default: "insideword"--attend to inside token).
         
         """
         output = src

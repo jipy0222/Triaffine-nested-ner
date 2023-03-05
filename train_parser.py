@@ -4,8 +4,11 @@ import argparse
 def generate_parser():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--version", type=str, default="genia",
-                        choices=["ace05", "ace04", "genia91", "kbp"],
+    parser.add_argument("--task", type=str, default="ner",
+                        choices=["ner", "srl"],
+                        help="Task version.")
+    parser.add_argument("--version", type=str, default="ace04",
+                        choices=["ace05", "ace04", "genia91", "kbp", "conll2012srl"],
                         help="Dataset version.")
     parser.add_argument("--model", type=str, default="VanilllaSpanBase",
                         choices=["VanillaSpanBase", "SpanAttfullyconnect", "SpanAttschema"])
@@ -107,8 +110,8 @@ def generate_parser():
     parser.add_argument("--nhead", type=int, default=2)
     parser.add_argument("--nlayer", type=int, default=2)
     parser.add_argument("--span_pooling", type=str, default="max", choices=["max", "mean", "end", "diff", "attn"])
-    parser.add_argument("--attn_schema", type=str, default="none", choices=["none", "insidetoken", "samehandt", "subspan", "sibling"])
-    parser.add_argument("--span_pos_embed", action="store_true")
+    parser.add_argument("--attn_schema", type=str, default="none", choices=["none", "insideword", "samehandt", "subspan", "sibling"])
+    parser.add_argument("--span_pos_embed", type=str, default="none", choices=["none", "learning", "sin"])
     # parser.add_argument("--share_parser", action="store_true")
     # parser.add_argument("--unscale", action="store_true")  # for transformer not tri-affine attention
     # parser.add_argument("--scale", type=str, default="none",
@@ -123,7 +126,7 @@ def generate_parser():
     parser.add_argument("--freeze_bert", action="store_true")
     parser.add_argument("--use_context", action="store_true")
     parser.add_argument("--context_lstm", action="store_true")
-    parser.add_argument("--subword_aggr", type=str, default="first",
+    parser.add_argument("--subword_aggr", type=str, default="max",
                         choices=['first', 'mean', 'max'])
     parser.add_argument("--bert_output", type=str, default="last",
                         choices=['last', 'concat-last-4', 'mean-last-4'])
@@ -165,7 +168,7 @@ def generate_loss_config(args):
         loss_dict['alpha'] = args.focal_alpha
     if args.loss == "ldam":
         from data_util import get_cls_num_list
-        loss_dict['cls_num_list'] = get_cls_num_list(args.version)
+        loss_dict['cls_num_list'] = get_cls_num_list(args.task, args.version)
         loss_dict['max_m'] = args.ldam_max_m
         loss_dict['s'] = args.ldam_s
     if args.loss == "dice":

@@ -34,15 +34,16 @@ def main_name_list(bert_name_or_path_list):
     return ",".join([main_name(bert_name_or_path) for bert_name_or_path in bert_name_or_path_list.split(',')])
 
 def generate_output_folder_name(args):
+    args_list = [args.task]
     if args.model in ["SpanModel"]:
-        args_list = [args.version,
+        args_list += [args.version,
                     args.model,
                     main_name_list(args.bert_name_or_path),
                     args.score]
         if args.negative_sampling:
             args_list += [f"negd_{args.hard_neg_dist}"]
     if args.model in ["VanillaSpanBase", "SpanAttfullyconnect", "SpanAttschema"]:
-        args_list = [args.version,
+        args_list += [args.version,
                     args.model,
                     main_name_list(args.bert_name_or_path),
                     args.class_loss_weight,

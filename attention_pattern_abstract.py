@@ -4,22 +4,22 @@ if __name__ == '__main__':
     seq = 30
 
     # Only attend to inside-token
-    print("insidetoken")
-    insidetoken_dict = {}
-    insidetokenlen_dict = {}
+    print("insideword")
+    insideword_dict = {}
+    insidewordlen_dict = {}
     for i in range(1, seq+1):
         for j in range(i, seq+1):
-            if j-i+1 not in insidetoken_dict:
-                insidetoken_dict[j-i+1] = [(i, j)]
-                insidetokenlen_dict[j-i+1] = 1
+            if j-i+1 not in insideword_dict:
+                insideword_dict[j-i+1] = [(i, j)]
+                insidewordlen_dict[j-i+1] = 1
             else:
-                insidetoken_dict[j-i+1].append((i, j))
-                insidetokenlen_dict[j-i+1] += 1
+                insideword_dict[j-i+1].append((i, j))
+                insidewordlen_dict[j-i+1] += 1
 
-    print(insidetokenlen_dict)
-    print("variance of attention:", len(insidetokenlen_dict))
-    # for item in insidetoken_dict.keys():
-    #     print(item, insidetoken_dict[item])
+    print(insidewordlen_dict)
+    print("variance of attention:", len(insidewordlen_dict))
+    # for item in insideword_dict.keys():
+    #     print(item, insideword_dict[item])
 
     total_span = 0
     total = 0
@@ -29,7 +29,7 @@ if __name__ == '__main__':
             total_span += 1
     expectation = total/total_span
     print("expectation: ", expectation)
-    print("attention pattern 'insidetoken': only cares about the length of span")
+    print("attention pattern 'insideword': only cares about the length of span")
 
     # Only attend to sub-span
     print("subspan")

@@ -1,7 +1,7 @@
 import torch
 
 
-def prepare_input(batch, args=None, train=True, accelerator=False, device=None):
+def prepare_input(task, batch, args=None, train=True, accelerator=False, device=None):
     if args is not None:
         device = args.device
     batch_lst = []
@@ -28,6 +28,8 @@ def prepare_input(batch, args=None, train=True, accelerator=False, device=None):
               'r_input_word':batch_lst[14],
               'r_input_char':batch_lst[15],
               'r_input_pos':batch_lst[16]}
+    if task == "srl":
+        inputs["verb"] = batch_lst[-2]
     if train:
         inputs['label'] = batch_lst[17]
         if args.model == "TokenModel" or args.token_aux:

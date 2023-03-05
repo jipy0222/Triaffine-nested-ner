@@ -9,34 +9,61 @@ def tint(t):
         return t.item()
     return t
 
-def decode(dataloader, model, args, ema=None):
+def decode(task, dataloader, model, args, ema=None):
     # if accelerator is not None:
     #     return decode_accl(dataloader, model, args, accelerator)
     
-    model.eval()
-    predict_labels = []
-    
-    if ema is None:
-        with torch.no_grad():
-            for batch in dataloader:
-                inputs = prepare_input(batch, args, train=False)
-                result = model.predict(**inputs)
+    if task == "ner":
+        model.eval()
+        predict_labels = []
 
-                for i in range(batch[0].size(0)):
-                    predict_label = list(set([f'{tint(l[0])},{tint(l[1]) + 1} {dataloader.dataset.id2type[tint(l[2])]}' for l in result[i]]))
-                    predict_labels.append(predict_label)
-    else:
-        with torch.no_grad():
-            with ema.average_parameters():
+        if ema is None:
+            with torch.no_grad():
                 for batch in dataloader:
-                    inputs = prepare_input(batch, args, train=False)
+                    inputs = prepare_input(task, batch, args, train=False)
                     result = model.predict(**inputs)
 
                     for i in range(batch[0].size(0)):
                         predict_label = list(set([f'{tint(l[0])},{tint(l[1]) + 1} {dataloader.dataset.id2type[tint(l[2])]}' for l in result[i]]))
                         predict_labels.append(predict_label)
+        else:
+            with torch.no_grad():
+                with ema.average_parameters():
+                    for batch in dataloader:
+                        inputs = prepare_input(task, batch, args, train=False)
+                        result = model.predict(**inputs)
+
+                        for i in range(batch[0].size(0)):
+                            predict_label = list(set([f'{tint(l[0])},{tint(l[1]) + 1} {dataloader.dataset.id2type[tint(l[2])]}' for l in result[i]]))
+                            predict_labels.append(predict_label)
+
+        return predict_labels, []
     
-    return predict_labels, []
+    elif task == "srl":
+        model.eval()
+        predict_labels = []
+
+        if ema is None:
+            with torch.no_grad():
+                for batch in dataloader:
+                    inputs = prepare_input(task, batch, args, train=False)
+                    result = model.predict(**inputs)
+
+                    for i in range(batch[0].size(0)):
+                        predict_label = list(set([f'{tint(l[0])+1},{tint(l[1]) + 1} {dataloader.dataset.id2type[tint(l[2])]}' for l in result[i]]))
+                        predict_labels.append(predict_label)
+        else:
+            with torch.no_grad():
+                with ema.average_parameters():
+                    for batch in dataloader:
+                        inputs = prepare_input(task, batch, args, train=False)
+                        result = model.predict(**inputs)
+
+                        for i in range(batch[0].size(0)):
+                            predict_label = list(set([f'{tint(l[0])+1},{tint(l[1]) + 1} {dataloader.dataset.id2type[tint(l[2])]}' for l in result[i]]))
+                            predict_labels.append(predict_label)
+
+        return predict_labels, []
 
 def decode_threshold(dataloader, model, args=None, accelerator=None, threshold_list=[0.5], device=None):
     if accelerator is not None:
@@ -55,7 +82,7 @@ def decode_threshold(dataloader, model, args=None, accelerator=None, threshold_l
 
             for i in range(batch[0].size(0)):
                 for idx, threshold in enumerate(threshold_list):
-                    predict_label = list(set([f'{tint(l[0])},{tint(l[1]) + 1} {dataloader.dataset.id2type[tint(l[2])]}' for l in result[i] if l[3] >= threshold]))
+                    predict_label = list(set([f'{tint(l[0])+1},{tint(l[1]) + 1} {dataloader.dataset.id2type[tint(l[2])]}' for l in result[i] if l[3] >= threshold]))
                     predict_labels[idx].append(predict_label)
     
     return predict_labels, []
@@ -66,7 +93,7 @@ def write_predict(predict_labels, file_path):
             f.write('|'.join(predcit_label) + '\n')
     
     
-def metric(dataset, predict_labels_0, suffix=None):
+def metric(task, dataset, predict_labels_0, suffix=None):
     correct = 0
     predict_count = 0
     label_count = 0
@@ -74,11 +101,18 @@ def metric(dataset, predict_labels_0, suffix=None):
     true_labels = []
     for i in range(len(dataset)):
         true_label = []
-        for ent in dataset.df[i]['entities']:
-            st = ent['start']
-            ed = ent['end']
-            tp = ent['type']
-            true_label.append(f'{st},{ed} {tp}')
+        if task == "ner":
+            for ent in dataset.df[i]['entities']:
+                st = ent['start']
+                ed = ent['end']
+                tp = ent['type']
+                true_label.append(f'{st},{ed} {tp}')
+        elif task == "srl":
+            for ent in dataset.df[i]['argument']:
+                st = ent['start']
+                ed = ent['end']
+                tp = ent['type']
+                true_label.append(f'{st},{ed} {tp}')
         true_labels.extend(true_label)
         predict_label = predict_labels_0[i]
         
@@ -87,6 +121,7 @@ def metric(dataset, predict_labels_0, suffix=None):
                 correct += 1
         predict_count += len(predict_label)
         label_count += len(true_label)
+    
     if correct == 0:
         p = 0
         r = 0

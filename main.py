@@ -4,7 +4,7 @@ import os
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
-from data_util import NestedNERDataset, my_collate_fn
+from data_util import NestedNERDataset, ner_collate_fn, SRLDataset, srl_collate_fn
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
 import shutil
@@ -77,13 +77,23 @@ def run(args):
         dev_bert_embed = None
         test_bert_embed = None
     
-    train_dataset = NestedNERDataset(args.version, 'train', args.bert_name_or_path, args.truncate_length, args.schema, args.use_context, args.token_schema, bert_embed=train_bert_embed)
-    dev_dataset = NestedNERDataset(args.version, 'dev', args.bert_name_or_path, args.truncate_length, args.schema, args.use_context, args.token_schema, bert_embed=dev_bert_embed)
-    test_dataset = NestedNERDataset(args.version, 'test', args.bert_name_or_path, args.truncate_length, args.schema, args.use_context, args.token_schema, bert_embed=test_bert_embed)
+    if args.task == "ner":
+        train_dataset = NestedNERDataset(args.version, 'train', args.bert_name_or_path, args.truncate_length, args.schema, args.use_context, args.token_schema, bert_embed=train_bert_embed)
+        dev_dataset = NestedNERDataset(args.version, 'dev', args.bert_name_or_path, args.truncate_length, args.schema, args.use_context, args.token_schema, bert_embed=dev_bert_embed)
+        test_dataset = NestedNERDataset(args.version, 'test', args.bert_name_or_path, args.truncate_length, args.schema, args.use_context, args.token_schema, bert_embed=test_bert_embed)
+
+        train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, collate_fn=ner_collate_fn, shuffle=False, num_workers=1)
+        dev_dataloader = DataLoader(dev_dataset, batch_size=args.batch_size, collate_fn=ner_collate_fn, shuffle=False, num_workers=1)
+        test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, collate_fn=ner_collate_fn, shuffle=False, num_workers=1)
     
-    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, collate_fn=my_collate_fn, shuffle=False, num_workers=1)
-    dev_dataloader = DataLoader(dev_dataset, batch_size=args.batch_size, collate_fn=my_collate_fn, shuffle=False, num_workers=1)
-    test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, collate_fn=my_collate_fn, shuffle=False, num_workers=1)
+    elif args.task == "srl":
+        train_dataset = SRLDataset(args.version, 'train', args.bert_name_or_path, args.truncate_length, args.schema, args.token_schema, bert_embed=train_bert_embed)
+        dev_dataset = SRLDataset(args.version, 'dev', args.bert_name_or_path, args.truncate_length, args.schema, args.token_schema, bert_embed=dev_bert_embed)
+        test_dataset = SRLDataset(args.version, 'test', args.bert_name_or_path, args.truncate_length, args.schema, args.token_schema, bert_embed=test_bert_embed)
+
+        train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, collate_fn=srl_collate_fn, shuffle=False, num_workers=1)
+        dev_dataloader = DataLoader(dev_dataset, batch_size=args.batch_size, collate_fn=srl_collate_fn, shuffle=False, num_workers=1)
+        test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, collate_fn=srl_collate_fn, shuffle=False, num_workers=1)
 
     encoder_config_dict = generate_config(args)
     loss_config_dict = generate_loss_config(args)
@@ -115,17 +125,17 @@ def run(args):
     #                            loss_config=loss_config_dict).to(args.device)
     # Here to add self-defined model
     if args.model == "VanillaSpanBase":
-        model = VanillaSpanBase(args.bert_name_or_path, encoder_config_dict,
+        model = VanillaSpanBase(args.task, args.bert_name_or_path, encoder_config_dict,
                                len(train_dataset.type2id), score_setting,
                                loss_config=loss_config_dict).to(args.device)
     if args.model == "SpanAttfullyconnect":
-        model = SpanAttfullyconnect(args.bert_name_or_path, encoder_config_dict,
+        model = SpanAttfullyconnect(args.task, args.bert_name_or_path, encoder_config_dict,
                                     len(train_dataset.type2id), score_setting,
                                     loss_config=loss_config_dict).to(args.device)
     if args.model == "SpanAttschema":
-        model = SpanAttschema(args.bert_name_or_path, encoder_config_dict,
-                                    len(train_dataset.type2id), score_setting,
-                                    loss_config=loss_config_dict).to(args.device)
+        model = SpanAttschema(args.task, args.bert_name_or_path, encoder_config_dict,
+                              len(train_dataset.type2id), score_setting,
+                              loss_config=loss_config_dict).to(args.device)
     # check how model work in generate_optimizer_scheduler
     optimizer, scheduler = generate_optimizer_scheduler(args, model, len(train_dataloader))
     
@@ -201,8 +211,8 @@ def run(args):
     if ema is not None:
         ema = torch.load(best_ema).to(args.device)
     # check how model work in decode
-    dev_strict, dev_relax = decode(dev_dataloader, model, args, ema)
-    test_strict, test_relax = decode(test_dataloader, model, args, ema)
+    dev_strict, dev_relax = decode(args.task, dev_dataloader, model, args, ema)
+    test_strict, test_relax = decode(args.task, test_dataloader, model, args, ema)
     
     write_predict(dev_strict, os.path.join(output_path, 'dev_predict.txt'))
     write_predict(test_strict, os.path.join(output_path, 'test_predict.txt'))
@@ -223,7 +233,7 @@ def train_one_epoch(model, steps, train_dataloader, dev_dataloader, test_dataloa
         
     epoch_iterator = tqdm(train_dataloader, desc="Iteration", ascii=True)
     for batch_idx, batch in enumerate(epoch_iterator):
-        inputs = prepare_input(batch, args)
+        inputs = prepare_input(args.task, batch, args)
         loss = model(**inputs)
             
         batch_loss = float(loss.item())
@@ -248,19 +258,21 @@ def train_one_epoch(model, steps, train_dataloader, dev_dataloader, test_dataloa
             model.zero_grad()
         steps += 1
         
-    train_strict, train_relax = decode(train_dataloader, model, args, ema)
-    dev_strict, dev_relax = decode(dev_dataloader, model, args, ema)
+    train_strict, train_relax = decode(args.task, train_dataloader, model, args, ema)
+    
+    dev_strict, dev_relax = decode(args.task, dev_dataloader, model, args, ema)
     write_predict(dev_strict, os.path.join(output_path, f'dev_{epoch_idx}_predict.txt'))
-    test_strict, test_relax = decode(test_dataloader, model, args, ema)
+    test_strict, test_relax = decode(args.task, test_dataloader, model, args, ema)
     write_predict(test_strict, os.path.join(output_path, f'test_{epoch_idx}_predict.txt'))
-    train_metric = metric(train_dataloader.dataset, train_strict)
+    
+    train_metric = metric(args.task, train_dataloader.dataset, train_strict)
     if train_relax:
         train_metric = {**train_metric, **metric(train_dataloader.dataset, train_relax, "relax")}
-    dev_metric = metric(dev_dataloader.dataset, dev_strict)
+    dev_metric = metric(args.task, dev_dataloader.dataset, dev_strict)
     if dev_relax:
         dev_metric = {**dev_metric, **metric(dev_dataloader.dataset, dev_relax, "relax")}
         write_predict(dev_relax, os.path.join(output_path, f'dev_{epoch_idx}_relax_predict.txt'))
-    test_metric = metric(test_dataloader.dataset, test_strict)
+    test_metric = metric(args.task, test_dataloader.dataset, test_strict)
     if test_relax:
         test_metric = {**test_metric, **metric(test_dataloader.dataset, test_relax, "relax")}
         write_predict(test_relax, os.path.join(output_path, f'test_{epoch_idx}_relax_predict.txt'))

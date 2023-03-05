@@ -8,6 +8,7 @@ from model.text_encoder import TextEncoder
 from model.losses import create_loss_function
 from span_utils import negative_sampling
 from model.mytransformer import myTransformerEncoderLayer, myTransformerEncoder
+from model.position_embed import SinusoidalPositionalEmbedding
 # from span_utils import tensor_idx_add
 from model.mlp import MLP, MultiClassifier
 
@@ -468,10 +469,11 @@ from model.mlp import MLP, MultiClassifier
 
 
 class VanillaSpanBase(nn.Module):
-    def __init__(self, bert_model_path, encoder_config_dict,
+    def __init__(self, task, bert_model_path, encoder_config_dict,
                  num_class, score_setting, loss_config):
         super(VanillaSpanBase, self).__init__()
 
+        self.task = task
         self.encoder = TextEncoder(bert_model_path, encoder_config_dict[0], encoder_config_dict[1], encoder_config_dict[2], encoder_config_dict[3], encoder_config_dict[4])
         self.encoder_config_dict = encoder_config_dict
         self.hidden_dim = self.encoder.bert_hidden_dim
@@ -537,7 +539,10 @@ class VanillaSpanBase(nn.Module):
         else:
             temphd = int(self._hidden_dim/2)
             self.linear_proj = MLP(self.hidden_dim, temphd, temphd, 2, self.dropout, self.act)
-        self.classifier = MLP(self._hidden_dim, 64, self.num_class, 4)
+        if self.task == "ner":
+            self.classifier = MLP(self._hidden_dim, 64, self.num_class, 4)
+        elif self.task == "srl":
+            self.classifier = MLP(int(self._hidden_dim*2), 128, self.num_class, 4)
         if self.pooling == "attn":
             self.attention_params = nn.Linear(self._hidden_dim, 1)
 
@@ -546,7 +551,7 @@ class VanillaSpanBase(nn.Module):
                            input_word, input_char, input_pos,
                            l_input_word, l_input_char, l_input_pos,
                            r_input_word, r_input_char, r_input_pos,
-                           bert_embed=None):
+                           verb, bert_embed=None):
         # 0 .get memory: bsz * word_cnt * hidden_size(1024)
         # 1. projection
         # 2. make span representation matrix by different methods(try mean first)
@@ -589,21 +594,41 @@ class VanillaSpanBase(nn.Module):
                span_repr[:, range(seq - i), range(i, seq), :] = torch.cat((proj_repr[:, i:, :]+proj_repr[:, 0:seq-i, :], proj_repr[:, i:, :]-proj_repr[:, 0:seq-i, :]), dim=2).to(span_repr.dtype)
         elif self.pooling == 'attn':
             # proj_repr: bsz * word_cnt * hd(256)
-            ak = torch.exp(self.attention_params(proj_repr))  # bsz * word_cnt * 1
-            ek = proj_repr*ak
-            suma = torch.zeros(bsz, seq, seq, 1).to(memory.device)
-            sume = torch.zeros(bsz, seq, seq, hd).to(memory.device)
-            for i in range(ak.size()[1]):
-                if i == 0:
-                    suma[:, range(seq - i), range(i, seq), :] = ak[:, i:, :]
-                    sume[:, range(seq - i), range(i, seq), :] = ek[:, i:, :]
-                else:
-                    suma[:, range(seq-i), range(i,seq), :] = suma[:, range(seq-i), range(i-1, seq-1), :] + ak[:, i:, :]
-                    sume[:, range(seq-i), range(i,seq), :] = sume[:, range(seq-i), range(i-1, seq-1), :] + ek[:, i:, :]
-            span_repr = (sume / suma).to(memory.device)
-            span_repr = span_repr.nan_to_num(nan=0)
+            # ak = torch.exp(self.attention_params(proj_repr))  # bsz * word_cnt * 1
+            # ek = proj_repr*ak
+            # suma = torch.zeros(bsz, seq, seq, 1).to(memory.device)
+            # sume = torch.zeros(bsz, seq, seq, hd).to(memory.device)
+            # for i in range(ak.size()[1]):
+            #     if i == 0:
+            #         suma[:, range(seq - i), range(i, seq), :] = ak[:, i:, :]
+            #         sume[:, range(seq - i), range(i, seq), :] = ek[:, i:, :]
+            #     else:
+            #         suma[:, range(seq-i), range(i,seq), :] = suma[:, range(seq-i), range(i-1, seq-1), :] + ak[:, i:, :]
+            #         sume[:, range(seq-i), range(i,seq), :] = sume[:, range(seq-i), range(i-1, seq-1), :] + ek[:, i:, :]
+            # span_repr = (sume / suma).to(memory.device)
+            # span_repr = span_repr.nan_to_num(nan=0)
+            ak = self.attention_params(proj_repr)
+            complete_ak = torch.broadcast_to(ak[:, None, None, ...], (bsz, seq, seq, seq, 1))
+            seq_t = torch.arange(seq).to(memory.device)
+            seq_x = seq_t.unsqueeze(-1).unsqueeze(-1).repeat(1, seq, seq)
+            seq_y = seq_t.unsqueeze(0).unsqueeze(-1).repeat(seq, 1, seq)
+            seq_z = seq_t.unsqueeze(0).unsqueeze(0).repeat(seq, seq, 1)
+            mask = torch.bitwise_or(seq_z > seq_y, seq_z < seq_x).unsqueeze(0).unsqueeze(-1)
+            complete_ak = complete_ak.masked_fill(mask, -1e6)
+            alpha = F.softmax(complete_ak, dim=-2)  # alpha: bsz*seq*seq*seq*1
+            proj_repr_new = torch.broadcast_to(proj_repr[:, None, None, ...], (bsz, seq, seq, seq, hd))
+            alpha_new = alpha.transpose(-2, -1)
+            span_repr = torch.matmul(alpha_new, proj_repr_new).squeeze(-2)
         else:
             raise RuntimeError("Invalid span pooling method.")
+
+        # create span concate verb
+        if self.task == "srl":
+            verb_repr = torch.zeros([bsz, hd]).to(memory.device)
+            for b in range(bsz):
+                verb_repr[b] = span_repr[b, verb[b]-1, verb[b]-1, :]
+            verb_repr = torch.broadcast_to(verb_repr[:, None, None, :], (bsz, seq, seq, hd))
+            span_repr = torch.cat((span_repr, verb_repr), dim=-1)
 
         # create mask to identify illegal span with True
         seq_t = torch.arange(seq)
@@ -613,6 +638,9 @@ class VanillaSpanBase(nn.Module):
         embs = torch.broadcast_to(embeds_length[:, None, None], (bsz, seq, seq)).to(seq_x.device)
         mask2 = seq_x >= embs
         mask = mask1 | mask2
+        if self.task == "srl":
+            for b in range(bsz):
+                mask[b, verb[b]-1, verb[b]-1] = True
         mask = torch.broadcast_to(mask[..., None], (bsz, seq, seq, self.num_class)).to(span_repr.device)
 
         # bsz * word_cnt * word_cnt * hidden_dimension(256) -> bsz * word_cnt * word_cnt * class
@@ -624,7 +652,7 @@ class VanillaSpanBase(nn.Module):
 
     def forward(self, input_ids, attention_mask, ce_mask, token_type_ids, subword_group, input_word, input_char,
                 input_pos,
-                label, context_ce_mask=None, context_subword_group=None, context_map=None,
+                label, verb=None, context_ce_mask=None, context_subword_group=None, context_map=None,
                 l_input_word=None, l_input_char=None, l_input_pos=None,
                 r_input_word=None, r_input_char=None, r_input_pos=None,
                 token_label=None, bert_embed=None, head_trans=None, tail_trans=None):
@@ -633,7 +661,7 @@ class VanillaSpanBase(nn.Module):
                                         input_word, input_char, input_pos,
                                         l_input_word, l_input_char, l_input_pos,
                                         r_input_word, r_input_char, r_input_pos,
-                                        bert_embed)
+                                        verb, bert_embed)
         word_cnt = logit.size(1)
         label = label[:, 0:word_cnt, 0:word_cnt]
         if self.negative_sampling:
@@ -650,14 +678,14 @@ class VanillaSpanBase(nn.Module):
                 input_word, input_char, input_pos,
                 l_input_word, l_input_char, l_input_pos,
                 r_input_word, r_input_char, r_input_pos,
-                bert_embed=None):
+                verb=None, bert_embed=None):
 
         logit, mask = self.get_class_position(input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
                                         context_ce_mask, context_subword_group, context_map,
                                         input_word, input_char, input_pos,
                                         l_input_word, l_input_char, l_input_pos,
                                         r_input_word, r_input_char, r_input_pos,
-                                        bert_embed)
+                                        verb, bert_embed)
         bsz = logit.size(0)
         seq = logit.size(1)
         embeds_length = (input_word != max(input_word.view(-1))).sum(1)
@@ -667,7 +695,7 @@ class VanillaSpanBase(nn.Module):
             idx = torch.argmax(logit[i], dim=-1).tolist()
             for x in range(seq):
                 for y in range(seq):
-                    if x <= y < embeds_length[i] and idx[x][y] < self.true_class:
+                    if mask[i, x, y, 0] == False and idx[x][y] < self.true_class:
                         result[i].append([x, y, idx[x][y]])
         return result
 
@@ -922,22 +950,29 @@ class VanillaSpanAttn(VanillaSpanBase):
 
 
 class SpanAttfullyconnect(VanillaSpanBase):
-    def __init__(self, bert_model_path, encoder_config_dict,
+    def __init__(self, task, bert_model_path, encoder_config_dict,
                  num_class, score_setting, loss_config):
-        super(SpanAttfullyconnect, self).__init__(bert_model_path,
+        super(SpanAttfullyconnect, self).__init__(task, bert_model_path,
                                              encoder_config_dict,
                                              num_class,
                                              score_setting,
                                              loss_config)
-        if self.pooling not in ["end", "diff"]:
-            self.linear_proj = MLP(self.hidden_dim, self._hidden_dim, self._hidden_dim, 2, self.dropout, self.act)
-        else:
+        if self.pooling in ["end", "diff"]:
             temphd = int(self._hidden_dim/2)
             self.linear_proj = MLP(self.hidden_dim, temphd, temphd, 2, self.dropout, self.act)
+        else:
+            self.linear_proj = MLP(self.hidden_dim, self._hidden_dim, self._hidden_dim, 2, self.dropout, self.act)
         self.classifier = MLP(self._hidden_dim, 64, self.num_class, 4)
         if self.pooling == "attn":
             self.attention_params = nn.Linear(self._hidden_dim, 1)
-        self.span_pos_embed = self.encoder_config_dict[5].get('span_pos_embed', False)
+        self.span_pos_embed = self.encoder_config_dict[5].get('span_pos_embed', 'none')
+        if self.span_pos_embed in ["sin", "learning"]:
+            if self.span_pos_embed == "sin":
+                temphd = int(self._hidden_dim/2)
+                self.position_embed = SinusoidalPositionalEmbedding(200, temphd)
+            else:
+                temphd = int(self._hidden_dim/2)
+                self.position_embed = nn.Embedding(200, temphd)
         self.tranheads = self.encoder_config_dict[5].get('nhead', 2)
         self.tranlayers = self.encoder_config_dict[5].get('nlayer', 2)
         trans_encoder_layer = nn.TransformerEncoderLayer(d_model=self._hidden_dim, nhead=self.tranheads)
@@ -949,7 +984,7 @@ class SpanAttfullyconnect(VanillaSpanBase):
                            input_word, input_char, input_pos,
                            l_input_word, l_input_char, l_input_pos,
                            r_input_word, r_input_char, r_input_pos,
-                           bert_embed=None):
+                           verb, bert_embed=None):
         # 0 .get memory: bsz * word_cnt * hidden_size(1024)
         # 1. projection
         # 2. make span representation matrix by different methods(try max first)
@@ -991,27 +1026,36 @@ class SpanAttfullyconnect(VanillaSpanBase):
             for i in range(proj_repr.size()[1]):
                span_repr[:, range(seq - i), range(i, seq), :] = torch.cat((proj_repr[:, i:, :]+proj_repr[:, 0:seq-i, :], proj_repr[:, i:, :]-proj_repr[:, 0:seq-i, :]), dim=2).to(span_repr.dtype)
         elif self.pooling == 'attn':
-            ak = torch.exp(self.attention_params(proj_repr))  # bsz * word_cnt * 1
-            ek = proj_repr*ak
-            suma = torch.zeros(bsz, seq, seq, 1).to(memory.device)
-            sume = torch.zeros(bsz, seq, seq, hd).to(memory.device)
-            for i in range(ak.size()[1]):
-                if i == 0:
-                    suma[:, range(seq - i), range(i, seq), :] = ak[:, i:, :]
-                    sume[:, range(seq - i), range(i, seq), :] = ek[:, i:, :]
-                else:
-                    suma[:, range(seq-i), range(i,seq), :] = suma[:, range(seq-i), range(i-1, seq-1), :] + ak[:, i:, :]
-                    sume[:, range(seq-i), range(i,seq), :] = sume[:, range(seq-i), range(i-1, seq-1), :] + ek[:, i:, :]
-            span_repr = (sume / suma).to(memory.device)
-            span_repr = span_repr.nan_to_num(nan=0)
+            ak = self.attention_params(proj_repr)
+            complete_ak = torch.broadcast_to(ak[:, None, None, ...], (bsz, seq, seq, seq, 1))
+            seq_t = torch.arange(seq).to(memory.device)
+            seq_x = seq_t.unsqueeze(-1).unsqueeze(-1).repeat(1, seq, seq)
+            seq_y = seq_t.unsqueeze(0).unsqueeze(-1).repeat(seq, 1, seq)
+            seq_z = seq_t.unsqueeze(0).unsqueeze(0).repeat(seq, seq, 1)
+            mask = torch.bitwise_or(seq_z > seq_y, seq_z < seq_x).unsqueeze(0).unsqueeze(-1)
+            complete_ak = complete_ak.masked_fill(mask, -1e6)
+            alpha = F.softmax(complete_ak, dim=-2)  # alpha: bsz*seq*seq*seq*1
+            proj_repr_new = torch.broadcast_to(proj_repr[:, None, None, ...], (bsz, seq, seq, seq, hd))
+            alpha_new = alpha.transpose(-2, -1)
+            span_repr = torch.matmul(alpha_new, proj_repr_new).squeeze(-2)
         else:
             raise RuntimeError("Invalid span pooling method.")
         
-        if self.span_pos_embed:
-            pos_repr = torch.zeros(bsz, seq, seq, hd).to(memory.device)
-            for i in range(span_repr.size()[1]):
-                pos_repr[:, range(seq - i), range(i, seq), :] = span_repr[:, 0:seq - i, :] + span_repr[:, i:, :]
-            span_repr = span_repr + pos_repr
+        # position encoding/embedding
+        if self.span_pos_embed != "none":
+            if self.span_pos_embed in ["sin", "learning"]:
+                sen_pos = torch.arange(seq).repeat(bsz).reshape(bsz, seq).to(memory.device)
+                if self.span_pos_embed == "learning":
+                    sen_pos_repr = self.position_embed(sen_pos)  # bsz * seq * hd
+                else:
+                    sen_pos_repr = self.position_embed(proj_repr.size())
+                    sen_pos_repr = torch.broadcast_to(sen_pos_repr[None, ...], (bsz, seq, int(self._hidden_dim/2)))
+                pos_repr = torch.zeros(bsz, seq, seq, hd).to(memory.device)
+                for i in range(pos_repr.size()[1]):
+                    pos_repr[:, range(seq - i), range(i, seq), :] = torch.cat((sen_pos_repr[:, 0:seq - i, :], sen_pos_repr[:, i:, :]), dim=2).to(pos_repr.dtype)
+                span_repr = span_repr + pos_repr
+            else:
+                raise RuntimeError("Invalid span position embedding method.")
 
         # create src_key_mask to identify illegal span with True
         seq_t = torch.arange(seq)
@@ -1022,6 +1066,9 @@ class SpanAttfullyconnect(VanillaSpanBase):
         mask2 = seq_x >= embs
         mask = mask1 | mask2
         src_key_mask = mask.reshape(bsz, seq*seq).to(span_repr.device)
+        if self.task == "srl":
+            for b in range(bsz):
+                mask[b, verb[b]-1, verb[b]-1] = True
         mask = torch.broadcast_to(mask[..., None], (bsz, seq, seq, self.num_class)).to(span_repr.device)
 
         # create src_mask to implement attention schema
@@ -1052,6 +1099,14 @@ class SpanAttfullyconnect(VanillaSpanBase):
         # src_key_mask = src_key_mask.reshape(bsz, seq * seq)
         span_repr = self.trans(trans_repr.permute(1, 0, 2), src_key_padding_mask=src_key_mask).permute(1, 0, 2)
         span_repr = span_repr.reshape(bsz, seq, seq, hd)
+
+        # create span concate verb
+        if self.task == "srl":
+            verb_repr = torch.zeros([bsz, hd]).to(memory.device)
+            for b in range(bsz):
+                verb_repr[b] = span_repr[b, verb[b]-1, verb[b]-1, :]
+            verb_repr = torch.broadcast_to(verb_repr[:, None, None, :], (bsz, seq, seq, hd))
+            span_repr = torch.cat((span_repr, verb_repr), dim=-1)
 
         # bsz * word_cnt * word_cnt * hidden_dimension(1024) -> bsz * word_cnt * word_cnt * class
         logit = self.classifier(span_repr)
@@ -1152,7 +1207,7 @@ class SpanAttInToken(VanillaSpanBase):
         # bsz * word_cnt * word_cnt * hidden_dimension(256) into transformer encoder
         trans_repr = span_repr.reshape(bsz, seq * seq, hd)
         # src_key_mask = src_key_mask.reshape(bsz, seq * seq)
-        span_repr = self.trans(trans_repr.permute(1, 0, 2), src_len=embeds_length, attn_pattern="insidetoken").permute(1, 0, 2)
+        span_repr = self.trans(trans_repr.permute(1, 0, 2), src_len=embeds_length, attn_pattern="insideword").permute(1, 0, 2)
         span_repr = span_repr.reshape(bsz, seq, seq, hd)
 
         # bsz * word_cnt * word_cnt * hidden_dimension(1024) -> bsz * word_cnt * word_cnt * class
@@ -1369,21 +1424,29 @@ class SpanAttsibling(VanillaSpanBase):
 
 
 class SpanAttschema(VanillaSpanBase):
-    def __init__(self, bert_model_path, encoder_config_dict,
+    def __init__(self, task, bert_model_path, encoder_config_dict,
                  num_class, score_setting, loss_config):
-        super(SpanAttschema, self).__init__(bert_model_path,
+        super(SpanAttschema, self).__init__(task, bert_model_path,
                                              encoder_config_dict,
                                              num_class,
                                              score_setting,
                                              loss_config)
-        if self.pooling not in ["end", "diff"]:
-            self.linear_proj = MLP(self.hidden_dim, self._hidden_dim, self._hidden_dim, 2, self.dropout, self.act)
-        else:
+        if self.pooling in ["end", "diff"]:
             temphd = int(self._hidden_dim/2)
             self.linear_proj = MLP(self.hidden_dim, temphd, temphd, 2, self.dropout, self.act)
+        else:
+            self.linear_proj = MLP(self.hidden_dim, self._hidden_dim, self._hidden_dim, 2, self.dropout, self.act)
         self.classifier = MLP(self._hidden_dim, 64, self.num_class, 4)
         if self.pooling == "attn":
             self.attention_params = nn.Linear(self._hidden_dim, 1)
+        self.span_pos_embed = self.encoder_config_dict[5].get('span_pos_embed', 'none')
+        if self.span_pos_embed in ["sin", "learning"]:
+            if self.span_pos_embed == "sin":
+                temphd = int(self._hidden_dim/2)
+                self.position_embed = SinusoidalPositionalEmbedding(200, temphd)
+            else:
+                temphd = int(self._hidden_dim/2)
+                self.position_embed = nn.Embedding(200, temphd)
         self.attn_schema = self.encoder_config_dict[5].get('attn_schema', 'none')
         self.tranheads = self.encoder_config_dict[5].get('nhead', 2)
         self.tranlayers = self.encoder_config_dict[5].get('nlayer', 2)
@@ -1396,7 +1459,7 @@ class SpanAttschema(VanillaSpanBase):
                            input_word, input_char, input_pos,
                            l_input_word, l_input_char, l_input_pos,
                            r_input_word, r_input_char, r_input_pos,
-                           bert_embed=None):
+                           verb, bert_embed=None):
         memory = self.encoder(input_ids, attention_mask, ce_mask, token_type_ids, subword_group,
                               context_ce_mask, context_subword_group, context_map,
                               input_word, input_char, input_pos,
@@ -1432,22 +1495,37 @@ class SpanAttschema(VanillaSpanBase):
             for i in range(proj_repr.size()[1]):
                span_repr[:, range(seq - i), range(i, seq), :] = torch.cat((proj_repr[:, i:, :]+proj_repr[:, 0:seq-i, :], proj_repr[:, i:, :]-proj_repr[:, 0:seq-i, :]), dim=2).to(span_repr.dtype)
         elif self.pooling == 'attn':
-            ak = torch.exp(self.attention_params(proj_repr))  # bsz * word_cnt * 1
-            ek = proj_repr*ak
-            suma = torch.zeros(bsz, seq, seq, 1).to(memory.device)
-            sume = torch.zeros(bsz, seq, seq, hd).to(memory.device)
-            for i in range(ak.size()[1]):
-                if i == 0:
-                    suma[:, range(seq - i), range(i, seq), :] = ak[:, i:, :]
-                    sume[:, range(seq - i), range(i, seq), :] = ek[:, i:, :]
-                else:
-                    suma[:, range(seq-i), range(i,seq), :] = suma[:, range(seq-i), range(i-1, seq-1), :] + ak[:, i:, :]
-                    sume[:, range(seq-i), range(i,seq), :] = sume[:, range(seq-i), range(i-1, seq-1), :] + ek[:, i:, :]
-            span_repr = (sume / suma).to(memory.device)
-            span_repr = span_repr.nan_to_num(nan=0)
+            ak = self.attention_params(proj_repr)
+            complete_ak = torch.broadcast_to(ak[:, None, None, ...], (bsz, seq, seq, seq, 1))
+            seq_t = torch.arange(seq).to(memory.device)
+            seq_x = seq_t.unsqueeze(-1).unsqueeze(-1).repeat(1, seq, seq)
+            seq_y = seq_t.unsqueeze(0).unsqueeze(-1).repeat(seq, 1, seq)
+            seq_z = seq_t.unsqueeze(0).unsqueeze(0).repeat(seq, seq, 1)
+            mask = torch.bitwise_or(seq_z > seq_y, seq_z < seq_x).unsqueeze(0).unsqueeze(-1)
+            complete_ak = complete_ak.masked_fill(mask, -1e6)
+            alpha = F.softmax(complete_ak, dim=-2)  # alpha: bsz*seq*seq*seq*1
+            proj_repr_new = torch.broadcast_to(proj_repr[:, None, None, ...], (bsz, seq, seq, seq, hd))
+            alpha_new = alpha.transpose(-2, -1)
+            span_repr = torch.matmul(alpha_new, proj_repr_new).squeeze(-2)
         else:
             raise RuntimeError("Invalid span pooling method.")
         
+        # position encoding/embedding
+        if self.span_pos_embed != "none":
+            if self.span_pos_embed in ["sin", "learning"]:
+                sen_pos = torch.arange(seq).repeat(bsz).reshape(bsz, seq).to(memory.device)
+                if self.span_pos_embed == "learning":
+                    sen_pos_repr = self.position_embed(sen_pos)  # bsz * seq * hd
+                else:
+                    sen_pos_repr = self.position_embed(proj_repr.size())
+                    sen_pos_repr = torch.broadcast_to(sen_pos_repr[None, ...], (bsz, seq, int(self._hidden_dim/2)))
+                pos_repr = torch.zeros(bsz, seq, seq, hd).to(memory.device)
+                for i in range(pos_repr.size()[1]):
+                    pos_repr[:, range(seq - i), range(i, seq), :] = torch.cat((sen_pos_repr[:, 0:seq - i, :], sen_pos_repr[:, i:, :]), dim=2).to(pos_repr.dtype)
+                span_repr = span_repr + pos_repr
+            else:
+                raise RuntimeError("Invalid span position embedding method.")
+
         # create src_key_mask to identify illegal span with True
         seq_t = torch.arange(seq)
         seq_x = torch.broadcast_to(seq_t[None, None, ...], (bsz, seq, seq))
@@ -1456,6 +1534,9 @@ class SpanAttschema(VanillaSpanBase):
         embs = torch.broadcast_to(embeds_length[:, None, None], (bsz, seq, seq)).to(seq_x.device)
         mask2 = seq_x >= embs
         mask = mask1 | mask2
+        if self.task == "srl":
+            for b in range(bsz):
+                mask[b, verb[b]-1, verb[b]-1] = True
         mask = torch.broadcast_to(mask[..., None], (bsz, seq, seq, self.num_class)).to(span_repr.device)
 
         # bsz * word_cnt * word_cnt * hidden_dimension(256) into transformer encoder
@@ -1464,6 +1545,14 @@ class SpanAttschema(VanillaSpanBase):
         trans_repr = span_repr.reshape(bsz, seq * seq, hd)
         span_repr = self.trans(trans_repr.permute(1, 0, 2), src_len=embeds_length, attn_pattern=self.attn_schema).permute(1, 0, 2)
         span_repr = span_repr.reshape(bsz, seq, seq, hd)
+
+        # create span concate verb
+        if self.task == "srl":
+            verb_repr = torch.zeros([bsz, hd]).to(memory.device)
+            for b in range(bsz):
+                verb_repr[b] = span_repr[b, verb[b]-1, verb[b]-1, :]
+            verb_repr = torch.broadcast_to(verb_repr[:, None, None, :], (bsz, seq, seq, hd))
+            span_repr = torch.cat((span_repr, verb_repr), dim=-1)
 
         # bsz * word_cnt * word_cnt * hidden_dimension(1024) -> bsz * word_cnt * word_cnt * class
         logit = self.classifier(span_repr)
